@@ -52,6 +52,71 @@ After init, your coding agent can use AQE tools directly. For example in Claude 
 
 ---
 
+## Claude Code Plugin (Alternative Install)
+
+If you only need a slim, scoped fleet inside Claude Code — without the full `aqe init` setup — install the **`agentic-qe-fleet`** plugin. It bundles 11 specialized QE agents, 9 slash commands, 9 skills, and auto-registers the MCP server.
+
+### Install from a local checkout
+
+```bash
+git clone https://github.com/proffesor-for-testing/agentic-qe.git
+claude --plugin-dir ./agentic-qe/plugins/agentic-qe-fleet
+```
+
+### Install from the marketplace
+
+In any Claude Code session:
+
+```
+/plugin marketplace add proffesor-for-testing/agentic-qe
+/plugin install agentic-qe-fleet
+```
+
+### What you get
+
+| Asset | Count | Notes |
+|---|---|---|
+| **Agents** (Task tool) | 11 | Model-routed: 6 on Opus (heavy reasoning), 5 on Sonnet (focused execution) |
+| **Slash commands** | 9 | `/aqe-analyze`, `/aqe-execute`, `/aqe-generate`, `/aqe-optimize`, `/aqe-chaos`, `/aqe-fleet-status`, `/aqe-report`, `/aqe-benchmark`, `/aqe-costs` |
+| **Skills** | 9 | All trust-tier 2 or 3 (validated/verified). Tier-1 untested skills excluded per policy. |
+| **MCP server** | 1 | Auto-registers via `npx -y agentic-qe@latest mcp` — no separate `claude mcp add` |
+
+**Bundled agents:** `qe-test-architect`, `qe-coverage-specialist`, `qe-flaky-hunter`, `qe-chaos-engineer`, `qe-fleet-commander`, `qe-quality-gate`, `qe-security-scanner`, `qe-performance-tester`, `qe-regression-analyzer`, `qe-tdd-specialist`, `qe-requirements-validator`.
+
+**Bundled skills:** `qe-test-generation`, `qe-coverage-analysis`, `qe-test-execution`, `qe-chaos-resilience`, `qe-quality-assessment`, `chaos-engineering-resilience`, `mutation-testing`, `risk-based-testing`, `tdd-london-chicago`.
+
+### Use it
+
+After loading the plugin, the slash commands and agents are available immediately:
+
+```
+/aqe-fleet-status                 # health and metrics
+/aqe-generate src/services/Auth.ts
+/aqe-analyze src/                 # coverage gap analysis
+```
+
+Or invoke an agent through the Task tool:
+
+```
+"Use qe-test-architect to generate tests for src/services/PaymentService.ts"
+"Use qe-flaky-hunter to find and stabilize flaky tests in tests/integration/"
+"Use qe-chaos-engineer to inject network partitions into the order workflow"
+```
+
+### Plugin vs `aqe init` — which to use?
+
+| | **Plugin** | **`aqe init`** |
+|---|---|---|
+| Setup | One slash command | Full project setup |
+| Scope | 11 agents, 9 skills | 60 agents, 85 skills |
+| Persistent learning DB | No (uses MCP server's) | Yes (`.agentic-qe/memory.db`) |
+| Cross-platform support | Claude Code only | 11 platforms (Cursor, Copilot, Cline, etc.) |
+| Use when | Quick start, single Claude Code project | Production team setup, multi-platform, full fleet |
+
+You can run both — the plugin's MCP server uses the same `agentic-qe` package, so installing both gives you the full fleet via `aqe init` and the slash-command shortcuts via the plugin.
+
+---
+
 ## Platform Support
 
 AQE works with **11 coding agent platforms** through a single MCP server:

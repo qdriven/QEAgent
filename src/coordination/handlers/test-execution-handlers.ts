@@ -11,6 +11,56 @@ import { ok, err } from '../../shared/types';
 import { toError } from '../../shared/error-utils.js';
 import type { TaskHandlerContext } from './handler-types';
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Rewrite any temp-source references in a generated test so the user gets a
+ * test that imports from the original source path (when known) or a clear
+ * placeholder. Without this, generated tests reference the throwaway
+ * `/tmp/aqe-temp-*` file we created for analysis — that file is unlinked
+ * after generation, so the test would never run as-emitted.
+ *
+ * The generator may emit the temp path with the original extension
+ * (`/tmp/aqe-temp-X.ts`), with a substituted extension
+ * (`/tmp/aqe-temp-X.test.ts`), or extension-stripped (TS import convention:
+ * `/tmp/aqe-temp-X`). All three forms must be rewritten.
+ *
+ * Exported for unit testing (bug #1 regression).
+ */
+export function rewriteTempPathsInGeneratedTest(
+  testCode: string | undefined,
+  sourceFile: string | undefined,
+  tempPath: string | undefined,
+  originalFilePath: string | undefined
+): { testCode?: string; sourceFile?: string } {
+  if (!tempPath) {
+    return { testCode, sourceFile };
+  }
+  // For the user's import target we strip the source extension when the
+  // original is a path (TS imports omit `.ts`); preserve it otherwise.
+  const stripExt = (p: string): string => p.replace(/\.[a-z]+$/i, '');
+  const replacement = originalFilePath
+    ? (originalFilePath.match(/\.(ts|tsx|js|jsx|mjs|cjs)$/i) ? stripExt(originalFilePath) : originalFilePath)
+    : './module-under-test';
+  const todoComment = originalFilePath
+    ? ''
+    : `// TODO: replace './module-under-test' with the actual import path of the module under test\n`;
+  // Build a regex that matches the temp path with any (or no) extension suffix.
+  // Order matters: replace extension-bearing forms before extension-less, since
+  // the extension-less form is a prefix of the others.
+  const tempBase = stripExt(tempPath);
+  const tempBaseEscaped = escapeRegExp(tempBase);
+  // Matches: <base>.<ext> | <base>.<ext>.<ext> | <base>
+  const anyForm = new RegExp(tempBaseEscaped + '(?:\\.[a-zA-Z]+){0,2}', 'g');
+  const newCode = testCode
+    ? todoComment + testCode.replace(anyForm, replacement)
+    : testCode;
+  const newRef = sourceFile === tempPath ? (originalFilePath || sourceFile) : sourceFile;
+  return { testCode: newCode, sourceFile: newRef };
+}
+
 export function registerTestExecutionHandlers(ctx: TaskHandlerContext): void {
   // Register test generation handler - REAL IMPLEMENTATION
   ctx.registerHandler('generate-tests', async (task) => {
@@ -29,6 +79,7 @@ export function registerTestExecutionHandlers(ctx: TaskHandlerContext): void {
 
       // Determine source files to analyze
       let sourceFiles: string[] = [];
+      let tempPath: string | undefined;
       if (payload.sourceFiles && payload.sourceFiles.length > 0) {
         sourceFiles = payload.sourceFiles;
       } else if (payload.filePath) {
@@ -43,7 +94,7 @@ export function registerTestExecutionHandlers(ctx: TaskHandlerContext): void {
           cpp: '.cpp', c: '.c', scala: '.scala',
         };
         const ext = langExtMap[payload.language?.toLowerCase() || 'typescript'] || '.ts';
-        const tempPath = `/tmp/aqe-temp-${uuidv4()}${ext}`;
+        tempPath = `/tmp/aqe-temp-${uuidv4()}${ext}`;
         await fs.writeFile(tempPath, payload.sourceCode, 'utf-8');
         sourceFiles = [tempPath];
       }
@@ -59,15 +110,30 @@ export function registerTestExecutionHandlers(ctx: TaskHandlerContext): void {
         });
       }
 
-      // Use the real TestGeneratorService
+      // Use the real TestGeneratorService.
+      // Bug #1 fix: when we wrote a temp file for analysis, tell the generator
+      // to bake a sensible logical import path into the emitted tests instead
+      // of the throwaway temp path. If the user supplied filePath, use that;
+      // otherwise use a placeholder the user can edit.
       const framework = (payload.framework || 'vitest') as 'jest' | 'vitest' | 'mocha' | 'pytest' | 'node-test';
+      const importPathOverrides: Record<string, string> | undefined = tempPath
+        ? { [tempPath]: payload.filePath
+            ? payload.filePath.replace(/\.(ts|tsx|js|jsx|mjs|cjs)$/i, '')
+            : './module-under-test' }
+        : undefined;
       const result = await generator.generateTests({
         sourceFiles,
         testType: payload.testType || 'unit',
         framework,
         coverageTarget: payload.coverageGoal || 80,
         patterns: [],
+        importPathOverrides,
       });
+
+      // Always clean up the temp file we created — even on failure
+      if (tempPath) {
+        try { await fs.unlink(tempPath); } catch { /* best-effort */ }
+      }
 
       if (!result.success) {
         return result;
@@ -75,17 +141,30 @@ export function registerTestExecutionHandlers(ctx: TaskHandlerContext): void {
 
       const generatedTests = result.value;
 
-      return ok({
-        testsGenerated: generatedTests.tests.length,
-        coverageEstimate: generatedTests.coverageEstimate,
-        tests: generatedTests.tests.map(t => ({
+      // Rewrite any temp-path references in generated tests so users get tests
+      // that reference a real source path (or a clear placeholder) rather than
+      // a /tmp/aqe-temp-* path that never existed in their codebase.
+      const tests = generatedTests.tests.map(t => {
+        const rewritten = rewriteTempPathsInGeneratedTest(
+          t.testCode,
+          t.sourceFile,
+          tempPath,
+          payload.filePath
+        );
+        return {
           name: t.name,
           file: t.testFile,
           type: t.type,
-          sourceFile: t.sourceFile,
+          sourceFile: rewritten.sourceFile,
           assertions: t.assertions,
-          testCode: t.testCode,
-        })),
+          testCode: rewritten.testCode,
+        };
+      });
+
+      return ok({
+        testsGenerated: tests.length,
+        coverageEstimate: generatedTests.coverageEstimate,
+        tests,
         patternsUsed: generatedTests.patternsUsed,
       });
     } catch (error) {

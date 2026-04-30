@@ -41,6 +41,18 @@ export interface IGenerateTestsRequest {
   projectRoot?: string;
   compileValidation?: boolean;
   maxCompileRetries?: number;
+  /**
+   * Map of sourceFile path → import path to bake into generated test imports.
+   * Use this when the file at `sourceFiles[i]` is a temporary copy of source
+   * (e.g. an inline-source MCP call) and the generated tests should reference
+   * a different logical path. If a file is not in the map, the import path
+   * is derived from the source file path as before.
+   *
+   * Example:
+   *   { '/tmp/aqe-temp-abc.ts': './src/services/auth' }
+   * → generated test emits `import { ... } from './src/services/auth'`
+   */
+  importPathOverrides?: Record<string, string>;
 }
 
 export interface IGeneratedTests {

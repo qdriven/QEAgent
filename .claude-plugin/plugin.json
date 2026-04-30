@@ -1,0 +1,61 @@
+{
+  "name": "agentic-qe",
+  "version": "3.9.18",
+  "description": "Agentic Quality Engineering — AI-powered QE platform with 60 specialized agents, 75+ skills, sublinear coverage analysis, ReasoningBank pattern learning, and deep MCP integration for Claude Code and 11 coding agent platforms",
+  "author": {
+    "name": "Agentic QE Team",
+    "url": "https://github.com/proffesor-for-testing/agentic-qe"
+  },
+  "homepage": "https://github.com/proffesor-for-testing/agentic-qe",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/proffesor-for-testing/agentic-qe.git"
+  },
+  "bugs": {
+    "url": "https://github.com/proffesor-for-testing/agentic-qe/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "quality-engineering",
+    "testing",
+    "qe",
+    "tdd",
+    "test-generation",
+    "coverage-analysis",
+    "chaos-engineering",
+    "security-scanning",
+    "flaky-test-detection",
+    "mcp",
+    "claude-code",
+    "agentic-qe",
+    "pact",
+    "self-learning",
+    "ai-agents"
+  ],
+  "category": "testing",
+  "tags": [
+    "testing",
+    "quality",
+    "qe",
+    "tdd",
+    "automation",
+    "ai",
+    "agents",
+    "fleet",
+    "coverage",
+    "chaos",
+    "security"
+  ],
+  "engines": {
+    "claudeCode": ">=2.0.0",
+    "node": ">=20.0.0"
+  },
+  "mcpServers": {
+    "agentic-qe": {
+      "command": "npx",
+      "args": ["-y", "agentic-qe@latest", "mcp"],
+      "description": "Agentic QE MCP server — 86 tools for test generation, coverage analysis, quality assessment, chaos testing, security scanning, and fleet coordination",
+      "optional": false
+    }
+  }
+}

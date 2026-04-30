@@ -579,7 +579,11 @@ Return a JSON array of test suggestions, each with: { "name": "test name", "desc
 
     const generator = this.generatorFactory.create(framework);
     const moduleName = this.extractModuleName(sourceFile);
-    const importPath = this.getImportPath(sourceFile);
+    // Bug #1 fix: prefer caller-supplied import path override when present
+    // (used by MCP handler when sourceCode is written to a temp file but the
+    // generated tests should reference the original logical path).
+    const importPath = originalRequest?.importPathOverrides?.[sourceFile]
+      ?? this.getImportPath(sourceFile);
 
     const context: TestGenerationContext = {
       moduleName,

@@ -1,0 +1,15 @@
+{
+  "name": "agentic-qe",
+  "description": "Agentic QE Marketplace: Claude Code plugins for AI-powered quality engineering — test generation, coverage analysis, chaos engineering, security scanning, and TDD with self-learning fleet coordination",
+  "owner": {
+    "name": "Agentic QE",
+    "url": "https://github.com/proffesor-for-testing/agentic-qe"
+  },
+  "plugins": [
+    {
+      "name": "agentic-qe-fleet",
+      "source": "./plugins/agentic-qe-fleet",
+      "description": "PACT-based agentic quality engineering fleet — 11 specialized QE agents (model-routed across Opus/Sonnet), 9 trust-tier-2/3 skills, 9 slash commands, and auto-registered MCP server"
+    }
+  ]
+}

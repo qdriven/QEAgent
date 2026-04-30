@@ -222,6 +222,38 @@ describe('CoverageGapsTool', () => {
     expect(result.error).toContain('No coverage data found');
   });
 
+  it('should reference coverageFile path in error when explicit file is empty', async () => {
+    // Bug #4 regression: when user passes a coverageFile that parses but has no
+    // entries, the error must reference the file path so the user knows their
+    // parameter was honored, not silently dropped.
+    const fs = await import('fs');
+    const empty = '/tmp/aqe-empty-coverage-' + Date.now() + '.json';
+    fs.writeFileSync(empty, '{}');
+    try {
+      const result = await tool.invoke({
+        target: 'src/',
+        coverageFile: empty,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain(empty);
+      expect(result.error).toContain('contains no usable coverage data');
+    } finally {
+      fs.unlinkSync(empty);
+    }
+  });
+
+  it('should distinguish autodiscovery miss from explicit-file miss', async () => {
+    // Bug #4 regression: autodiscovery error must not look like an explicit-file
+    // error so users do not misdiagnose a dropped coverageFile parameter.
+    const result = await tool.invoke({
+      target: '/tmp/no-coverage-' + Date.now(),
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('autodiscovery');
+  });
+
   it('should filter by risk score (with demo mode)', async () => {
     const result = await tool.invoke({
       target: 'src/',
