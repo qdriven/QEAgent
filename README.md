@@ -65,7 +65,7 @@ claude --plugin-dir ./agentic-qe/plugins/agentic-qe-fleet
 
 ### Install from the marketplace
 
-Once `marketplace.json` is published to the repo root, install in any Claude Code session:
+In any Claude Code session:
 
 ```
 /plugin marketplace add proffesor-for-testing/agentic-qe
