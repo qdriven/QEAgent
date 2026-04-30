@@ -1,0 +1,23 @@
+{
+  "name": "agentic-qe-fleet",
+  "description": "PACT-based agentic quality engineering fleet — 11 specialized QE agents, sublinear coverage analysis, chaos/resilience testing, and TDD skills for Claude Code",
+  "version": "0.1.0",
+  "author": {
+    "name": "Agentic QE",
+    "url": "https://github.com/proffesor-for-testing/agentic-qe"
+  },
+  "homepage": "https://github.com/proffesor-for-testing/agentic-qe",
+  "license": "MIT",
+  "keywords": [
+    "quality-engineering",
+    "testing",
+    "qe",
+    "tdd",
+    "chaos-engineering",
+    "coverage",
+    "test-generation",
+    "claude-code",
+    "agentic-qe",
+    "pact"
+  ]
+}

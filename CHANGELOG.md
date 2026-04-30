@@ -5,6 +5,28 @@ All notable changes to the Agentic QE project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.18] - 2026-04-30
+
+**Four MCP fixes shipped together: governance no longer blocks legitimate tool calls, generated jest tests now actually run, and coverage error messages tell you what really happened.** Also adds the `agentic-qe-fleet` Claude Code plugin (11 agents, 9 commands, 9 skills) for one-command install via `/plugin marketplace`.
+
+### Fixed
+
+- **`coverage_analyze_sublinear` and other domain MCP tools blocked by governance after 1–2 calls** — `continue-gate-integration.ts` was passing a synthetic `history.length * 500` token estimate to the guidance gate. The linear-regression slope detector saw slope = 500, threshold = 0.02, and emitted a `throttle` decision. The integration then mapped `throttle` to `shouldContinue: false`, surfacing as `Task blocked by governance: Budget acceleration detected (slope: 500.0000 > 0.02)` on legitimate first-time tool invocations. Root-cause fix: replaced the synthetic estimate with `totalTokensUsed: 0` and `budgetRemaining.tokens: MAX_SAFE_INTEGER` until real token telemetry is wired in. The coherence/uncertainty/rework checks still operate on real signals. `mapGuidanceDecision` was also corrected so `throttle` is treated as a soft slowdown hint (proceed with `throttleMs`), and only `pause`/`stop` block.
+- **`test_generate_enhanced` with `framework: "jest"` produced tests that crashed at runtime** — the generator emitted `import { describe, it, expect, beforeEach } from 'jest';`, but the `'jest'` package is the CLI, not a runtime export. Tests-as-emitted failed with `Cannot find module 'jest'`. Fix: emit `from '@jest/globals'` for jest (modern jest 28+ runtime API) and `from 'vitest'` for vitest. Both the main analysis path and the stub fallback now produce framework-correct imports.
+- **Generated test imports referenced `/tmp/aqe-temp-*` paths that never existed in the user's codebase** — when callers passed `sourceCode` without `filePath`, the handler wrote a temp file for analysis and the generator baked that throwaway path into emitted test imports. Fix: added `IGenerateTestsRequest.importPathOverrides` so the handler can tell the generator the logical import path (the user-supplied `filePath` when available, or `'./module-under-test'` placeholder + TODO comment when not). The temp file is also explicitly cleaned up via `fs.unlink` after generation.
+- **`qe/coverage/gaps` error message misled callers about which input failed** — when an explicit `coverageFile` parsed to zero entries, the tool returned `"No coverage data found in '<target>'"` (templated with `target`, not `coverageFile`). Callers reasonably assumed the `coverageFile` parameter was being silently dropped. Fix: distinguish the two miss paths — empty `coverageFile` returns `"Coverage file '<path>' contains no usable coverage data..."`; autodiscovery miss returns `"No coverage data found by autodiscovery under target '<target>'..."`.
+
+### Added
+
+- **`test_generate_enhanced` MCP schema now exposes `framework`, `filePath`, `coverageGoal`, `aiEnhancement`, and `detectAntiPatterns` parameters** — previously only `sourceCode`, `language`, and `testType` were declared, so `framework: jest` and other args were silently dropped at the schema validation layer even though the underlying handler accepted them.
+- **`agentic-qe-fleet` Claude Code plugin** — a slim starter bundle of the AQE platform installable via `/plugin marketplace add ruvnet/agentic-qe`. Includes 11 specialized QE agents (model-routed: 6 on Opus for heavy reasoning, 5 on Sonnet for focused execution), 9 trust-tier-2/3 skills with scoped `allowed-tools` lists, 9 `/aqe-*` slash commands, and an auto-registered MCP server entry. Tier-1 (untested) skills are excluded from the bundle per AQE trust-tier policy.
+- **`scripts/smoke-test-fixes.sh`** — end-to-end MCP smoke test covering all four fixes with proper exit-code handling (single sys.exit, no false negatives).
+- **`scripts/plugin-load-test.sh`** — 14-check structural validation for the bundled plugin.
+
+### Changed
+
+- **`IGenerateTestsRequest` interface gains `importPathOverrides?: Record<string, string>`** — public API extension. Existing callers continue to work; the field is opt-in and only consulted when present.
+
 ## [3.9.17] - 2026-04-27
 
 **One-line fix that closes the routing learning loop.** The shipped `aqe init` template wired the UserPromptSubmit hook to `--task "$PROMPT"`, but Claude Code never exposed `$PROMPT` as an env var — every prompt routed as empty. The CLI now reads stdin event JSON, the templates drop the broken arg, and existing projects upgrade automatically on re-init.

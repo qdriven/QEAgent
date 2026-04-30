@@ -68,9 +68,16 @@ export class JestVitestGenerator extends BaseTestGenerator {
     const exports = this.extractExports(analysis.functions, analysis.classes);
     const importStatement = this.generateImportStatement(exports, importPath, moduleName);
 
-    const mockImport = this.framework === 'vitest' ? ', vi' : '';
+    // Per-framework imports:
+    // - vitest: `import { ..., vi } from 'vitest'` (vi is the mock util)
+    // - jest:   `import { ..., jest } from '@jest/globals'`
+    //   (jest 28+ provides @jest/globals; importing from 'jest' is invalid —
+    //    it's a CLI package, not a runtime export. Globals work too but
+    //    explicit imports match vitest style and are TS-friendly.)
+    const mockImport = this.framework === 'vitest' ? ', vi' : ', jest';
+    const importSource = this.framework === 'vitest' ? 'vitest' : '@jest/globals';
 
-    let testCode = `${patternComment}import { describe, it, expect, beforeEach${mockImport} } from '${this.framework}';
+    let testCode = `${patternComment}import { describe, it, expect, beforeEach${mockImport} } from '${importSource}';
 ${importStatement}
 `;
 
@@ -310,7 +317,11 @@ ${importStatement}
       callerTest += `    });\n`;
     }
 
-    return `${patternComment}import { ${moduleName} } from '${importPath}';
+    const stubImportSource = this.framework === 'vitest' ? 'vitest' : '@jest/globals';
+    const stubMockImport = this.framework === 'vitest' ? ', vi' : ', jest';
+
+    return `${patternComment}import { describe, it, expect, beforeEach${stubMockImport} } from '${stubImportSource}';
+import { ${moduleName} } from '${importPath}';
 ${mockDeclarations}
 describe('${moduleName}', () => {
 ${similarityComment}  describe('${testType} tests', () => {

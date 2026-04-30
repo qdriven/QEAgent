@@ -195,6 +195,17 @@ export class ContinueGateIntegration {
     if (this.guidanceContinueGate && localDecision.shouldContinue && !localDecision.reason) {
       try {
         const reworkRatio = this.calculateReworkRatio(history.slice(-10));
+        // ADR-058 NOTE: We do NOT track real per-action token usage here.
+        // Passing a synthetic estimate (e.g. history.length * 500) to the
+        // guidance gate causes the linear-regression slope detector to fire
+        // on the first multi-step interaction (slope = 500 vs 0.02 threshold),
+        // which would block legitimate one-off MCP tool calls.
+        //
+        // Until real token telemetry is wired in, we set totalTokensUsed = 0
+        // and a generous budgetRemaining. This effectively disables the
+        // budget-slope and budget-exhaustion checks (they require non-zero
+        // token data to fire) while keeping the coherence, rework, and
+        // uncertainty checks active — those use real data we DO have.
         const stepContext: GuidanceStepContext = {
           stepNumber: history.length,
           totalToolCalls: history.length,
@@ -203,9 +214,9 @@ export class ContinueGateIntegration {
           uncertaintyScore: reworkRatio,
           elapsedMs: history.length > 0 ? Date.now() - history[0].timestamp : 0,
           lastCheckpointStep: 0,
-          totalTokensUsed: history.length * 500, // Estimate ~500 tokens per action
+          totalTokensUsed: 0, // No real token telemetry — see comment above
           budgetRemaining: {
-            tokens: Math.max(0, (flags.maxConsecutiveRetries * 10 * 500) - (history.length * 500)),
+            tokens: Number.MAX_SAFE_INTEGER, // Defer budget gating to dedicated cost monitor
             toolCalls: Math.max(0, (flags.maxConsecutiveRetries * 10) - history.length),
             timeMs: Math.max(0, flags.idleTimeoutMs - (history.length > 0 ? Date.now() - history[history.length - 1].timestamp : 0)),
           },
@@ -329,16 +340,28 @@ export class ContinueGateIntegration {
    *
    * ContinueDecision has: { decision, reasons, metrics, recommendedAction }
    * We map to: { shouldContinue, reason, throttleMs, escalate, reworkRatio }
+   *
+   * Decision semantics:
+   * - 'continue', 'checkpoint': proceed normally
+   * - 'throttle': proceed but caller should slow down (soft signal — not a block).
+   *   The recommended action is "slow down", not "abort". Treating throttle as
+   *   a hard rejection would cause legitimate work to be denied; the caller can
+   *   apply the throttleMs as a backoff hint between subsequent calls.
+   * - 'pause', 'stop': block this task
+   *
+   * NOTE: With totalTokensUsed pinned to 0 in the caller (no real token
+   * telemetry yet), the guidance gate's budget-slope detector cannot fire,
+   * so 'throttle' from this path is rare in practice — it would only fire
+   * if some other slowdown signal (not budget) were configured.
    */
   private mapGuidanceDecision(decision: GuidanceContinueDecision, agentId: string): ContinueGateDecision {
     const flags = governanceFlags.getFlags().continueGate;
-    const shouldContinue = decision.decision === 'continue' || decision.decision === 'checkpoint';
+    const isBlocking = decision.decision === 'pause' || decision.decision === 'stop';
+    const shouldContinue = !isBlocking;
     const reason = decision.reasons.length > 0 ? decision.reasons.join('; ') : undefined;
 
-    // Throttle on 'throttle', 'pause', or 'stop'
-    if (!shouldContinue && flags.throttleOnExceed) {
-      const throttleMs = decision.decision === 'stop' ? 30000 :
-                         decision.decision === 'pause' ? 15000 : 5000;
+    if (isBlocking && flags.throttleOnExceed) {
+      const throttleMs = decision.decision === 'stop' ? 30000 : 15000;
       this.throttledAgents.set(agentId, Date.now() + throttleMs);
     }
 
@@ -348,7 +371,7 @@ export class ContinueGateIntegration {
       throttleMs: decision.decision === 'throttle' ? 5000 :
                   decision.decision === 'pause' ? 15000 :
                   decision.decision === 'stop' ? 30000 : undefined,
-      escalate: decision.decision === 'stop' || decision.decision === 'pause',
+      escalate: isBlocking,
       reworkRatio: decision.metrics.reworkRatio,
     };
   }

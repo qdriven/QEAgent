@@ -897,12 +897,17 @@ export class MCPProtocolServer {
     this.registerTool({
       definition: {
         name: 'test_generate_enhanced',
-        description: 'Generate unit/integration/e2e tests with AI pattern recognition and anti-pattern detection. Example: test_generate_enhanced({ sourceCode: "function add(a,b){return a+b}", testType: "unit" })',
+        description: 'Generate unit/integration/e2e tests with AI pattern recognition and anti-pattern detection. Example: test_generate_enhanced({ sourceCode: "function add(a,b){return a+b}", testType: "unit", framework: "jest" })',
         category: 'domain',
         parameters: [
           { name: 'sourceCode', type: 'string', description: 'Source code to generate tests for' },
+          { name: 'filePath', type: 'string', description: 'Original source file path (used as the import target in generated tests; if omitted, generated tests reference the temp source)' },
           { name: 'language', type: 'string', description: 'Programming language' },
           { name: 'testType', type: 'string', description: 'Type of tests', enum: ['unit', 'integration', 'e2e'] },
+          { name: 'framework', type: 'string', description: 'Test framework to use', enum: ['jest', 'vitest', 'mocha', 'pytest', 'node-test'], default: 'vitest' },
+          { name: 'coverageGoal', type: 'number', description: 'Target coverage percentage (0-100)', default: 80 },
+          { name: 'aiEnhancement', type: 'boolean', description: 'Enable AI-powered enhancement', default: true },
+          { name: 'detectAntiPatterns', type: 'boolean', description: 'Detect and report anti-patterns', default: false },
         ],
       },
       handler: (params) => handleTestGenerate(params as unknown as Parameters<typeof handleTestGenerate>[0]),

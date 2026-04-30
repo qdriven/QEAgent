@@ -520,11 +520,20 @@ export class CoverageGapsTool extends MCPToolBase<CoverageGapsParams, CoverageGa
         return this.getDemoGapsResult(target, minRisk, limit, context);
       }
 
-      // If no coverage data found, return error with actionable guidance
+      // If no coverage data found, return error with actionable guidance.
+      // Distinguish between an explicitly-passed empty/invalid coverageFile
+      // (user passed a path; the file parsed but contained no usable data)
+      // and an autodiscover miss (no coverageFile passed; nothing found under target).
       if (!parsedReport || parsedReport.files.size === 0) {
+        if (coverageFile) {
+          return {
+            success: false,
+            error: `Coverage file '${coverageFile}' contains no usable coverage data (parsed 0 files). Verify the file is a non-empty Istanbul/LCOV/JaCoCo/etc. report.`,
+          };
+        }
         return {
           success: false,
-          error: `No coverage data found in '${target}'. Run your test suite with coverage enabled to generate coverage reports before detecting gaps.`,
+          error: `No coverage data found by autodiscovery under target '${target}'. Run your test suite with coverage enabled, or pass coverageFile pointing to an existing report.`,
         };
       }
 
