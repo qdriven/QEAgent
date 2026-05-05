@@ -365,7 +365,7 @@ OUTPUT="${OUTPUT}  ${DIM}│${RESET}  ${CYAN}Mode${RESET} ${LEARNING_MODE_COLOR}
 OUTPUT="${OUTPUT}  ${DIM}│${RESET}  ${CYAN}Transfer${RESET} ${TRANSFER_COLOR}${TRANSFER_INDICATOR}${TRANSFER_COUNT}${RESET}"
 
 # Line 4: Architecture Status
-ADR_DIR="${PROJECT_DIR}/implementation/adrs"
+ADR_DIR="${PROJECT_DIR}/docs/implementation/adrs"
 ADR_FILE="${ADR_DIR}/v3-adrs.md"
 ADR_COUNT=0
 ADR_ACCEPTED=0
