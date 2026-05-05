@@ -173,6 +173,12 @@ export function registerRoutingHooks(hooks: Command): void {
           }
           const db = um.getDatabase();
           const outcomeId = `route-${Date.now()}-${randomUUID().slice(0, 8)}`;
+          // AQE_RUFLO patch 150: split-write semantics. quality_score now means
+          // "outcome quality after task ran" (6-dim formula), NOT routing
+          // confidence. Routing-confidence stays in decision_json. We write a
+          // sentinel here so post-task UPDATE can fill the actual quality.
+          // lowConfidence flag (patch 320) is also captured in decision_json.
+          const lowConfidence = routing.confidence < 0.5;
           db.prepare(`
             INSERT OR REPLACE INTO routing_outcomes (
               id, task_json, decision_json, used_agent,
@@ -186,13 +192,14 @@ export function registerRoutingHooks(hooks: Command): void {
               recommended: routing.recommendedAgent,
               confidence: routing.confidence,
               alternatives: routing.alternatives,
+              lowConfidence,
             }),
             routing.recommendedAgent,
-            1, // followed_recommendation = true (recommendation stage)
-            1, // success = true (routing itself succeeded)
-            routing.confidence,
-            0, // duration not tracked at routing stage
-            null
+            1,    // followed_recommendation = true
+            0,    // success = 0 (sentinel — post-task UPDATEs)
+            -1,   // quality_score = -1 sentinel
+            0,    // duration not yet tracked
+            lowConfidence ? 'low-confidence' : null,
           );
 
           // Increment dream experience counter
