@@ -440,8 +440,8 @@ export class LearningConsolidationWorker extends BaseWorker {
             Math.round(candidate.sourceExperiences * candidate.successRate)
           );
 
-          // AQE_RUFLO patch 290: pair the qe_patterns row with an embedding so
-          // HNSW pattern recall doesn't see this as a "ghost". Fail-soft.
+          // Pair the qe_patterns row with an embedding so HNSW pattern recall
+          // doesn't see this as a "ghost" (ADR-058 embedding-locality). Fail-soft.
           const { ensurePatternEmbedding } = await import('../../learning/embed-and-insert-pattern.js');
           await ensurePatternEmbedding(db, patternId, candidate.name, description, candidate.actions);
 

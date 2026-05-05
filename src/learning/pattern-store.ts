@@ -559,9 +559,9 @@ export class PatternStore implements IPatternStore {
           this.hnswAvailable = true;
           console.log('[PatternStore] Using unified HNSW via HnswLegacyBridge (ADR-071)');
 
-          // AQE_RUFLO patch 030: load existing qe_pattern_embeddings into the
-          // unified bridge on first init. Without this the unified path starts
-          // empty and routing falls back to context-only matches.
+          // Load existing qe_pattern_embeddings into the unified bridge on
+          // first init. Without this the unified path starts empty and
+          // routing falls back to context-only matches.
           await this.loadEmbeddingsIntoHNSW();
           return;
         } catch (bridgeError) {
@@ -1570,9 +1570,9 @@ export class PatternStore implements IPatternStore {
       count++;
     }
 
-    // AQE_RUFLO patch 040: trigger lazy HNSW init for stats so `aqe hooks
-    // stats --json` reflects actual `vectorCount` instead of pre-init zeros.
-    // Cost is bounded by ensureHNSW's 5s timeout + the load loop cap.
+    // Lazy-init HNSW for stats so `aqe hooks stats --json` reflects actual
+    // vectorCount instead of pre-init zeros. Cost is bounded by ensureHNSW's
+    // 5s timeout plus the load-loop cap.
     const hnsw = await this.ensureHNSW();
     const hnswStats = hnsw !== null
       ? await hnsw.getStats()

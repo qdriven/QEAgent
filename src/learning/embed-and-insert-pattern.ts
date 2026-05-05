@@ -1,17 +1,17 @@
 /**
- * Pattern embedding helper — unifies the 3 memory.db `qe_patterns` writers.
+ * Pattern embedding helper — unifies the 3 memory.db `qe_patterns` writers
+ * per ADR-058 (embedding-locality).
  *
- * Background: AQE_RUFLO patch 290 / ADR-058 (embedding-locality).
  * Three live writers in our codebase write to `qe_patterns`:
  *
  *   1. learning/sqlite-persistence.ts:497    SQLitePatternStore.storePattern (canonical)
- *   2. cli/commands/hooks-handlers/hooks-dream-learning.ts:305  (consolidateAgentPatterns)
- *   3. workers/workers/learning-consolidation.ts:412            (createPatternsFromCandidates)
+ *   2. cli/commands/hooks-handlers/hooks-dream-learning.ts                  (consolidateAgentPatterns)
+ *   3. workers/workers/learning-consolidation.ts                             (createPatternsFromCandidates)
  *
  * Only the canonical writer pairs the row with a `qe_pattern_embeddings` row
- * via `computeRealEmbedding(text, qeConfig.embeddings)`. Writers 2 & 3 bypassed
- * embedding generation entirely, producing "ghost" patterns that load with no
- * vectors and stay invisible to HNSW pattern recall.
+ * via `computeRealEmbedding(text, qeConfig.embeddings)`. Writers 2 & 3
+ * historically bypassed embedding generation, producing "ghost" patterns that
+ * loaded with no vectors and stayed invisible to HNSW pattern recall.
  *
  * This helper provides the embedding side so any caller can compute and persist
  * the embedding adjacent to its existing INSERT INTO qe_patterns. It is
