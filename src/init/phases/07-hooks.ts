@@ -495,7 +495,7 @@ if (process.argv.includes('--json')) process.stdout.write(JSON.stringify(result)
         },
         // Task routing
         {
-          matcher: '^Task$',
+          matcher: '^(Task|Agent)$',
           hooks: [
             {
               type: 'command',
@@ -531,7 +531,7 @@ if (process.argv.includes('--json')) process.stdout.write(JSON.stringify(result)
           ],
         },
         {
-          matcher: '^Task$',
+          matcher: '^(Task|Agent)$',
           hooks: [
             {
               type: 'command',

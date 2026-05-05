@@ -558,6 +558,11 @@ export class PatternStore implements IPatternStore {
           this.hnswIndex = new HnswLegacyBridge(adapter);
           this.hnswAvailable = true;
           console.log('[PatternStore] Using unified HNSW via HnswLegacyBridge (ADR-071)');
+
+          // Load existing qe_pattern_embeddings into the unified bridge on
+          // first init. Without this the unified path starts empty and
+          // routing falls back to context-only matches.
+          await this.loadEmbeddingsIntoHNSW();
           return;
         } catch (bridgeError) {
           console.warn('[PatternStore] Unified HNSW bridge failed, falling back:', bridgeError);
@@ -590,41 +595,7 @@ export class PatternStore implements IPatternStore {
       this.hnswAvailable = this.hnswIndex.isNativeAvailable();
 
       // Load existing embeddings from SQLite into HNSW index (capped to prevent timeout)
-      if (this.sqliteStore) {
-        try {
-          const embeddings = this.sqliteStore.getAllEmbeddings();
-          const maxBootstrap = this.config.hnsw.maxElements;
-          let loaded = 0;
-          for (const { patternId, embedding } of embeddings) {
-            if (loaded >= maxBootstrap) break;
-            if (!embedding || embedding.length !== this.config.embeddingDimension) continue;
-            const pattern = this.patternCache.get(patternId);
-            if (!pattern) continue;
-            try {
-              await this.hnswIndex.insert(patternId, embedding, {
-                filePath: pattern.patternType,
-                lineCoverage: pattern.confidence * 100,
-                branchCoverage: pattern.qualityScore * 100,
-                functionCoverage: 0,
-                statementCoverage: 0,
-                uncoveredLineCount: 0,
-                uncoveredBranchCount: 0,
-                riskScore: 1 - pattern.confidence,
-                lastUpdated: Date.now(),
-                totalLines: 0,
-              } as import('../domains/coverage-analysis/services/hnsw-index.js').CoverageVectorMetadata);
-              loaded++;
-            } catch {
-              // Duplicate or invalid — skip
-            }
-          }
-          if (loaded > 0) {
-            console.log(`[PatternStore] Loaded ${loaded} embeddings from SQLite into HNSW`);
-          }
-        } catch (error) {
-          console.warn('[PatternStore] Failed to load SQLite embeddings into HNSW:', toErrorMessage(error));
-        }
-      }
+      await this.loadEmbeddingsIntoHNSW();
 
       console.log(
         `[PatternStore] HNSW lazy-initialized (native: ${this.hnswAvailable})`
@@ -636,6 +607,63 @@ export class PatternStore implements IPatternStore {
       );
       this.hnswIndex = null;
       this.hnswAvailable = false;
+    }
+  }
+
+  /**
+   * Load existing qe_pattern_embeddings into the active HNSW index.
+   *
+   * Shared between the unified-HNSW path (ADR-071) and the legacy fallback
+   * so both report a populated `vectorCount` after first init. Capped to
+   * `maxElements` to prevent boot timeout on large pattern stores.
+   */
+  private async loadEmbeddingsIntoHNSW(): Promise<void> {
+    if (!this.hnswIndex || !this.sqliteStore) return;
+    try {
+      const embeddings = this.sqliteStore.getAllEmbeddings();
+      const maxBootstrap = this.config.hnsw.maxElements;
+      let loaded = 0;
+      let skipped = 0;
+      for (const { patternId, embedding } of embeddings) {
+        if (loaded >= maxBootstrap) break;
+        if (!embedding || embedding.length !== this.config.embeddingDimension) {
+          skipped++;
+          continue;
+        }
+        const pattern = this.patternCache.get(patternId);
+        if (!pattern) {
+          skipped++;
+          continue;
+        }
+        try {
+          await this.hnswIndex.insert(patternId, embedding, {
+            filePath: pattern.patternType,
+            lineCoverage: pattern.confidence * 100,
+            branchCoverage: pattern.qualityScore * 100,
+            functionCoverage: 0,
+            statementCoverage: 0,
+            uncoveredLineCount: 0,
+            uncoveredBranchCount: 0,
+            riskScore: 1 - pattern.confidence,
+            lastUpdated: Date.now(),
+            totalLines: 0,
+          } as import('../domains/coverage-analysis/services/hnsw-index.js').CoverageVectorMetadata);
+          loaded++;
+        } catch {
+          // Duplicate or invalid — skip
+          skipped++;
+        }
+      }
+      if (loaded > 0) {
+        console.log(
+          `[PatternStore] Loaded ${loaded} embeddings into HNSW (skipped ${skipped})`,
+        );
+      }
+    } catch (error) {
+      console.warn(
+        '[PatternStore] Failed to load SQLite embeddings into HNSW:',
+        toErrorMessage(error),
+      );
     }
   }
 
@@ -1542,9 +1570,12 @@ export class PatternStore implements IPatternStore {
       count++;
     }
 
-    // Get HNSW stats only if already initialized (no lazy-load for stats)
-    const hnswStats = this.hnswIndex !== null
-      ? await this.hnswIndex.getStats()
+    // Lazy-init HNSW for stats so `aqe hooks stats --json` reflects actual
+    // vectorCount instead of pre-init zeros. Cost is bounded by ensureHNSW's
+    // 5s timeout plus the load-loop cap.
+    const hnsw = await this.ensureHNSW();
+    const hnswStats = hnsw !== null
+      ? await hnsw.getStats()
       : { nativeHNSW: false, vectorCount: 0, indexSizeBytes: 0, lazyLoaded: true };
 
     return {

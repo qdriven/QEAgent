@@ -169,6 +169,30 @@ export async function initializeHooksSystem(): Promise<void> {
 }
 
 /**
+ * Hook-side busy_timeout (ADR-001 Option C / patch 260).
+ *
+ * Hooks fire from short-lived `npx aqe hooks ...` subprocesses. They open the
+ * shared memory.db while MCP-daemon workers may be holding the WAL write-lock
+ * for several seconds during dream-cycle / pattern-promotion. With the default
+ * 5s busy_timeout, hooks fail under contention. With 60s, they wait patiently
+ * — the hook subprocess exits as soon as it's done, so the longer timeout has
+ * no broader cost.
+ *
+ * Workers in MCP still use the platform default (5s) so they fail fast and
+ * retry on the next tick — they yield the lock to hooks under contention.
+ *
+ * This is per-connection: setting the pragma in a hook subprocess only affects
+ * that subprocess's connection, not the MCP daemon's.
+ */
+export function applyHookBusyTimeout(db: { pragma: (s: string) => void }): void {
+  try {
+    db.pragma('busy_timeout = 60000');
+  } catch {
+    // No-op if pragma fails (mocked DBs in tests, etc.)
+  }
+}
+
+/**
  * Create hybrid backend with timeout protection
  *
  * ADR-046: Uses unified memory.db path for consistency with all other components.
@@ -178,13 +202,21 @@ export async function createHybridBackendWithTimeout(dataDir: string): Promise<M
   const timeoutMs = 5000;
 
   // ADR-046: Use unified memory.db path - same as all other components
-  // HybridMemoryBackend is a facade over UnifiedMemoryManager
+  // HybridMemoryBackend is a facade over UnifiedMemoryManager.
+  //
+  // ADR-001 Option C / patch 260: hooks open with a 60s busy_timeout so they
+  // wait patiently through worker bursts (dream-cycle / pattern-promotion
+  // can hold the WAL write-lock for several seconds). Hooks fire from a
+  // short-lived `npx aqe hooks ...` process — our 60s timeout here only
+  // affects the hook process; the MCP daemon's worker connections inherit
+  // the platform default (5s) so they fail fast and retry next tick,
+  // yielding the lock to hooks under contention.
   const backend = new HybridMemoryBackend({
     sqlite: {
       path: path.join(dataDir, 'memory.db'), // ADR-046: Unified storage
       walMode: true,
       poolSize: 3,
-      busyTimeout: 5000,
+      busyTimeout: 60000,
     },
     // agentdb.path is ignored - vectors stored in unified memory.db
     enableFallback: true,
@@ -290,8 +322,13 @@ export {
   DREAM_EXPERIENCE_THRESHOLD,
   DREAM_MIN_GAP_MS,
   type DreamHookState,
+  type TaskBridgePayload,
+  type TaskOutcomeResult,
   checkAndTriggerDream,
   incrementDreamExperience,
   persistCommandExperience,
+  persistTaskOutcome,
+  updateHookRouterQValue,
+  updateRoutingOutcomeQuality,
   consolidateExperiencesToPatterns,
 } from './hooks-dream-learning.js';

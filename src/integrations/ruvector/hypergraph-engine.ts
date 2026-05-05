@@ -14,6 +14,7 @@
  * @see /docs/plans/GOAP-V3-RUVECTOR-NEURAL-BACKBONE.md
  */
 
+import * as nodePath from 'node:path';
 import type { Database as DatabaseType } from 'better-sqlite3';
 import { v4 as uuidv4 } from 'uuid';
 import {
@@ -854,8 +855,13 @@ export class HypergraphEngine {
         }
       }
 
-      // Phase 2: Create entity nodes
+      // Phase 2: Create entity nodes + a `contains` edge from the file node
+      // to each entity node. Without the contains edge, hypergraph_edges only
+      // ever held import edges from Phase 3 — `findUntestedFunctions`,
+      // `findImpactedTests`, and `findCoverageGaps` all returned empty
+      // regardless of indexing activity.
       for (const file of indexResult.files) {
+        const fileNodeId = `file:${file.path}`;
         for (const entity of file.entities) {
           try {
             const entityId = `${entity.type}:${file.path}:${entity.name}`;
@@ -891,6 +897,21 @@ export class HypergraphEngine {
               );
               nodesCreated++;
             }
+
+            // file → entity contains edge (idempotent via INSERT OR REPLACE)
+            try {
+              const containsEdgeId = generateEdgeId(fileNodeId, entityId, 'contains');
+              this.config.db.prepare(`
+                INSERT OR REPLACE INTO hypergraph_edges (id, source_id, target_id, type, weight)
+                VALUES (?, ?, ?, 'contains', 1.0)
+              `).run(containsEdgeId, fileNodeId, entityId);
+              edgesCreated++;
+            } catch (edgeError) {
+              errors.push({
+                entity: `contains:${entity.type}:${entity.name}`,
+                error: toErrorMessage(edgeError),
+              });
+            }
           } catch (entityError) {
             errors.push({
               entity: `${entity.type}:${entity.name}`,
@@ -901,17 +922,48 @@ export class HypergraphEngine {
       }
 
       // Phase 3: Create import edges (now all file nodes exist)
+      // Resolves relative paths against the source file's directory and probes
+      // common TS/JS/Python extensions (and `/index.ext` for directory imports)
+      // so internal imports map to existing hypergraph_nodes. Without this
+      // resolver, relative imports never matched any node and 0 edges were
+      // ever persisted from intra-repo imports.
+      const RESOLVE_EXTENSIONS = ['.ts', '.tsx', '.js', '.jsx', '.py', '.mjs', '.cjs'];
+      const RESOLVE_INDEX_FILES = [
+        '/index.ts', '/index.tsx', '/index.js', '/index.jsx', '/index.py',
+      ];
+
       for (const file of indexResult.files) {
         const fileId = `file:${file.path}`;
 
         for (const importPath of file.imports) {
           try {
-            const targetId = `file:${importPath}`;
+            // Resolve relative imports against the source file's directory
+            let resolvedPath = importPath;
+            if (importPath.startsWith('./') || importPath.startsWith('../')) {
+              resolvedPath = nodePath.resolve(nodePath.dirname(file.path), importPath);
+            }
 
-            // Check if target node exists (import may reference external module)
-            const targetExists = this.config.db.prepare(
-              'SELECT id FROM hypergraph_nodes WHERE id = ?'
-            ).get(targetId);
+            let targetId = `file:${resolvedPath}`;
+
+            // Check if target node exists; probe extensions and /index.ext
+            const lookup = this.config.db.prepare(
+              'SELECT id FROM hypergraph_nodes WHERE id = ?',
+            );
+            let targetExists = lookup.get(targetId);
+            if (!targetExists) {
+              for (const ext of RESOLVE_EXTENSIONS) {
+                const candidate = targetId + ext;
+                const hit = lookup.get(candidate);
+                if (hit) { targetId = candidate; targetExists = hit; break; }
+              }
+            }
+            if (!targetExists) {
+              for (const idxFile of RESOLVE_INDEX_FILES) {
+                const candidate = targetId + idxFile;
+                const hit = lookup.get(candidate);
+                if (hit) { targetId = candidate; targetExists = hit; break; }
+              }
+            }
 
             if (targetExists) {
               const edgeId = generateEdgeId(fileId, targetId, 'imports');
@@ -1040,6 +1092,7 @@ export class HypergraphEngine {
       tests: 0,
       depends_on: 0,
       covers: 0,
+      contains: 0,
     };
     for (const row of edgesByTypeRows) {
       if (row.type in edgesByType) {

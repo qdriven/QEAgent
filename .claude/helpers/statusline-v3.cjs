@@ -458,7 +458,7 @@ function getContextUsage(claudeInput) {
 function getArchitectureMetrics(projectDir) {
   // ADR count - deduplicated across embedded and standalone files
   let adrCount = 0;
-  const adrDir = path.join(projectDir, 'implementation/adrs');
+  const adrDir = path.join(projectDir, 'docs/implementation/adrs');
   const adrFile = path.join(adrDir, 'v3-adrs.md');
   const uniqueAdrNums = new Set();
 

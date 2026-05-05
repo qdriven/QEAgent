@@ -13,6 +13,7 @@ import type { QERoutingRequest } from '../../../learning/qe-reasoning-bank.js';
 import type { QEDomain } from '../../../learning/qe-patterns.js';
 import { findProjectRoot } from '../../../kernel/unified-memory.js';
 import {
+  applyHookBusyTimeout,
   getHooksSystem,
   createHybridBackendWithTimeout,
   incrementDreamExperience,
@@ -172,7 +173,15 @@ export function registerRoutingHooks(hooks: Command): void {
             await um.initialize();
           }
           const db = um.getDatabase();
+          applyHookBusyTimeout(db);
           const outcomeId = `route-${Date.now()}-${randomUUID().slice(0, 8)}`;
+          // Split-write semantics: quality_score means "outcome quality after
+          // task ran" (6-dim formula), NOT routing confidence. Routing-
+          // confidence stays in decision_json. We write a sentinel
+          // (success=0, quality_score=-1) so post-task UPDATE fills the actual
+          // quality. lowConfidence is surfaced via decision_json + the error
+          // column so it's visible in queries that don't parse JSON.
+          const lowConfidence = routing.confidence < 0.5;
           db.prepare(`
             INSERT OR REPLACE INTO routing_outcomes (
               id, task_json, decision_json, used_agent,
@@ -186,13 +195,14 @@ export function registerRoutingHooks(hooks: Command): void {
               recommended: routing.recommendedAgent,
               confidence: routing.confidence,
               alternatives: routing.alternatives,
+              lowConfidence,
             }),
             routing.recommendedAgent,
-            1, // followed_recommendation = true (recommendation stage)
-            1, // success = true (routing itself succeeded)
-            routing.confidence,
-            0, // duration not tracked at routing stage
-            null
+            1,    // followed_recommendation = true
+            0,    // success = 0 (sentinel — post-task UPDATEs)
+            -1,   // quality_score = -1 sentinel
+            0,    // duration not yet tracked
+            lowConfidence ? 'low-confidence' : null,
           );
 
           // Increment dream experience counter

@@ -6,11 +6,14 @@
  */
 
 import { Command } from 'commander';
+import { existsSync, readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import chalk from 'chalk';
 import path from 'node:path';
 import { QE_HOOK_EVENTS } from '../../../learning/qe-hooks.js';
-import { findProjectRoot } from '../../../kernel/unified-memory.js';
+import { findProjectRoot, getUnifiedMemory } from '../../../kernel/unified-memory.js';
 import {
+  applyHookBusyTimeout,
   getHooksSystem,
   createHybridBackendWithTimeout,
   incrementDreamExperience,
@@ -19,6 +22,115 @@ import {
   printSuccess,
   printError,
 } from './hooks-shared.js';
+
+/**
+ * Detect test framework from a Bash command. Returns null when no recognized
+ * framework is invoked.
+ */
+function detectTestFramework(command: string): string | null {
+  if (/\bjest\b/i.test(command)) return 'jest';
+  if (/\bvitest\b/i.test(command)) return 'vitest';
+  if (/\bpytest\b/i.test(command)) return 'pytest';
+  if (/\bmocha\b/i.test(command)) return 'mocha';
+  return null;
+}
+
+/**
+ * Persist test_outcomes (patch 070) and coverage_sessions (patch 170) for a
+ * test-framework command. Best-effort — failures are logged at debug level.
+ */
+async function persistTestAndCoverage(opts: {
+  command: string;
+  framework: string;
+  success: boolean;
+  durationMs: number;
+}): Promise<void> {
+  try {
+    const um = getUnifiedMemory();
+    if (!um.isInitialized()) {
+      await um.initialize();
+    }
+    const db = um.getDatabase();
+    applyHookBusyTimeout(db);
+
+    const language = opts.framework === 'pytest' ? 'python' : 'javascript';
+    const cmdSlug = opts.command.split(/\s+/).slice(0, 3).join('-').slice(0, 80);
+
+    db.prepare(`
+      INSERT INTO test_outcomes (
+        id, test_id, test_name, generated_by, framework, language, domain,
+        passed, execution_time_ms, maintainability_score, created_at
+      ) VALUES (?, ?, ?, 'cli-hook-post-command', ?, ?, 'test-execution',
+                ?, ?, 0.5, datetime('now'))
+    `).run(
+      `to-${Date.now()}-${randomUUID().slice(0, 8)}`,
+      `cmd:${cmdSlug}`,
+      opts.command.slice(0, 200),
+      opts.framework,
+      language,
+      opts.success ? 1 : 0,
+      opts.durationMs,
+    );
+
+    // Patch 170: parse Istanbul coverage summary if it exists. Reuses the
+    // previous after_* values as before_* so coverage delta is calculable.
+    try {
+      const summaryPath = path.join(process.cwd(), 'coverage', 'coverage-summary.json');
+      if (existsSync(summaryPath)) {
+        const summary = JSON.parse(readFileSync(summaryPath, 'utf-8')) as {
+          total?: {
+            lines?: { pct?: number };
+            branches?: { pct?: number };
+            functions?: { pct?: number };
+          };
+        };
+        const total = summary.total ?? {};
+        const afterLines = Number(total.lines?.pct ?? 0);
+        const afterBranches = Number(total.branches?.pct ?? 0);
+        const afterFunctions = Number(total.functions?.pct ?? 0);
+
+        const prev = db.prepare(`
+          SELECT after_lines, after_branches, after_functions
+          FROM coverage_sessions
+          WHERE target_path = ?
+          ORDER BY created_at DESC
+          LIMIT 1
+        `).get(process.cwd()) as
+          | { after_lines: number; after_branches: number; after_functions: number }
+          | undefined;
+
+        const nowIso = new Date().toISOString();
+        db.prepare(`
+          INSERT INTO coverage_sessions (
+            id, target_path, agent_id, technique,
+            before_lines, before_branches, before_functions,
+            after_lines, after_branches, after_functions,
+            tests_generated, tests_passed, duration_ms,
+            started_at, completed_at
+          ) VALUES (?, ?, 'cli-hook-post-command', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+        `).run(
+          `cs-${Date.now()}-${randomUUID().slice(0, 8)}`,
+          process.cwd(),
+          opts.framework,
+          prev?.after_lines ?? 0,
+          prev?.after_branches ?? 0,
+          prev?.after_functions ?? 0,
+          afterLines,
+          afterBranches,
+          afterFunctions,
+          opts.success ? 1 : 0,
+          opts.durationMs,
+          nowIso,
+          nowIso,
+        );
+      }
+    } catch (covErr) {
+      console.error(chalk.dim(`[hooks] coverage_sessions: ${covErr instanceof Error ? covErr.message : 'unknown'}`));
+    }
+  } catch (error) {
+    console.error(chalk.dim(`[hooks] test_outcomes: ${error instanceof Error ? error.message : 'unknown'}`));
+  }
+}
 
 /**
  * Register guard, pre-command, and post-command subcommands on the hooks command.
@@ -231,15 +343,34 @@ export function registerCommandHooks(hooks: Command): void {
           });
           patternsLearned = 1;
 
-          // Persist as captured experience
-          await persistCommandExperience({
-            task: `bash: ${command}`,
-            agent: 'cli-hook',
-            domain,
-            success,
-            source: 'cli-hook-post-command',
-          });
-          experienceRecorded = true;
+          // Persist as captured experience — gated to test/build/lint commands
+          // so non-test Bash (git, ls, etc.) doesn't flood captured_experiences
+          // with low-success-rate noise that dilutes pattern signal.
+          // reasoningBank.recordOutcome above is the broader metric path and
+          // stays unconditional.
+          if (isTestCmd || isBuildCmd || isLintCmd) {
+            await persistCommandExperience({
+              task: `bash: ${command}`,
+              agent: 'cli-hook',
+              domain,
+              success,
+              source: 'cli-hook-post-command',
+            });
+            experienceRecorded = true;
+          }
+
+          // Patches 070 + 170: when a recognized test framework ran, write
+          // test_outcomes and (if Istanbul coverage summary is present) a
+          // coverage_sessions row. Best-effort.
+          const framework = detectTestFramework(command);
+          if (framework) {
+            await persistTestAndCoverage({
+              command,
+              framework,
+              success,
+              durationMs: 0, // post-command does not currently track exec time
+            });
+          }
 
           // Increment dream experience counter
           const projectRoot = findProjectRoot();

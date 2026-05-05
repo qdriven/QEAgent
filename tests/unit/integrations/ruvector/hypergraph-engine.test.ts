@@ -695,15 +695,15 @@ describe('HypergraphEngine', () => {
 
         // Should create nodes: 2 file nodes + 4 entity nodes = 6 nodes
         expect(result.nodesCreated).toBe(6);
-        // Should create edges: 1 import edge from math.ts -> utils.ts
-        expect(result.edgesCreated).toBe(1);
+        // Should create edges: 4 contains (file -> entity, one per entity) + 1 import (math.ts -> utils.ts)
+        expect(result.edgesCreated).toBe(5);
         expect(result.durationMs).toBeGreaterThanOrEqual(0);
         expect(result.errors).toHaveLength(0);
 
         // Verify nodes were created
         const stats = await engine.getStats();
         expect(stats.totalNodes).toBe(6);
-        expect(stats.totalEdges).toBe(1);
+        expect(stats.totalEdges).toBe(5);
       });
 
       it('should update existing nodes on rebuild', async () => {

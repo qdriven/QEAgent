@@ -164,6 +164,7 @@ export async function persistCommandExperience(opts: {
       await um.initialize();
     }
     const db = um.getDatabase();
+    try { db.pragma('busy_timeout = 60000'); } catch { /* hook-side patient timeout (ADR-001 / patch 260) */ }
     const id = `cli-${Date.now()}-${randomUUID().slice(0, 8)}`;
 
     // Compute quality based on context rather than binary success/fail.
@@ -204,6 +205,385 @@ export async function persistCommandExperience(opts: {
 }
 
 /**
+ * Bridge payload written by pre-task into kv_store namespace='task-bridge'.
+ * Read by persistTaskOutcome to fan out per-pattern apps + derive q-learning state.
+ */
+export interface TaskBridgePayload {
+  selectedPatternIds: string[];
+  agent: string | null;
+  description: string;
+  taskType: string;
+  priority: string;
+  domain: string;
+  complexityBucket: number;
+  estimatedTokenSavings: number;
+  ts: number;
+}
+
+/**
+ * Result of persistTaskOutcome — surfaces fields the q-learning post-task
+ * integration needs (patch 280 / Stream F).
+ */
+export interface TaskOutcomeResult {
+  /** captured_experiences row id (FK target for experience_applications) */
+  experienceId: string;
+  /** Outcome quality computed via the 6-dim formula */
+  qualityScore: number;
+  /** Bridge payload that was consumed (null if no bridge entry found) */
+  bridge: TaskBridgePayload | null;
+  /** Number of multi-step siblings stitched into the trajectory (0 if single-step) */
+  stitchedSiblings: number;
+  /** Number of dream_insights rows whose applied counter was incremented */
+  insightsApplied: number;
+}
+
+/**
+ * Persist a Task() outcome through the full experience pipeline.
+ *
+ * Pipeline rolled into one helper that:
+ *
+ *   1. Writes captured_experiences (source='cli-hook-post-task')
+ *   2. Reads kv_store task-bridge (selectedPatternIds + estimatedTokenSavings)
+ *   3. Writes experience_applications: 1 base row + 1 per pattern_id (160/300)
+ *   4. Deletes the bridge entry to prevent double-consumption
+ *   5. Writes a single-step qe_trajectories row (120)
+ *   6. Looks for sibling captured_experiences with task LIKE '%:taskId' in the
+ *      last hour; if ≥2, creates a multi-step traj-multi-... row and marks
+ *      siblings consolidated_into = traj-multi-id (180)
+ *   7. Increments dream_insights.applied for top-3 most-recent actionable rows
+ *      when the task succeeded (110)
+ *
+ * All steps run inside a single transaction so partial failures don't leave
+ * inconsistent state. Returns the experience_id and derived fields for the
+ * q-learning post-task integration (Stream F / patch 280).
+ */
+export async function persistTaskOutcome(opts: {
+  taskId: string;
+  agent: string;
+  domain?: string;
+  success: boolean;
+  durationMs?: number;
+}): Promise<TaskOutcomeResult> {
+  const { getUnifiedMemory } = await import('../../../kernel/unified-memory.js');
+  const um = getUnifiedMemory();
+  if (!um.isInitialized()) {
+    await um.initialize();
+  }
+  const db = um.getDatabase();
+  try { db.pragma('busy_timeout = 60000'); } catch { /* hook-side patient timeout (ADR-001 / patch 260) */ }
+
+  const experienceId = `exp-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const taskField = `${opts.agent}:${opts.taskId}`;
+  const durationMs = opts.durationMs ?? 0;
+
+  // 6-dim outcome quality (patch 080/150 canonical formula)
+  // 0.25 * effectiveness + 0.325 baseline + 0.10 * duration_tier
+  // Other 4 dims default-0.5 weighted contribute via the 0.325 baseline term.
+  const successScore = opts.success ? 1 : 0;
+  const durationTier =
+    durationMs < 100 ? 1.0 :
+    durationMs < 500 ? 0.8 :
+    durationMs < 2000 ? 0.6 :
+    durationMs < 5000 ? 0.4 :
+    durationMs < 10000 ? 0.2 : 0.1;
+  const qualityScore = 0.25 * successScore + 0.325 + 0.10 * durationTier;
+
+  let bridge: TaskBridgePayload | null = null;
+  let stitchedSiblings = 0;
+  let insightsApplied = 0;
+
+  const txn = db.transaction(() => {
+    // 1. captured_experiences row
+    db.prepare(`
+      INSERT INTO captured_experiences
+        (id, task, agent, domain, success, quality, duration_ms,
+         model_tier, started_at, completed_at, source)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'), datetime('now'), ?)
+    `).run(
+      experienceId,
+      taskField.slice(0, 500),
+      opts.agent,
+      opts.domain ?? 'general',
+      opts.success ? 1 : 0,
+      qualityScore,
+      durationMs,
+      'cli-hook-post-task',
+    );
+
+    // 2. Base experience_applications row
+    db.prepare(`
+      INSERT INTO experience_applications
+        (id, experience_id, task, success, tokens_saved, feedback, applied_at)
+      VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+    `).run(
+      `app-${Date.now()}-${randomUUID().slice(0, 8)}`,
+      experienceId,
+      taskField,
+      opts.success ? 1 : 0,
+      0,
+      `[Patch 060] post-task outcome: ${opts.success ? 'success' : 'failure'}`,
+    );
+
+    // 3. Read bridge → fan out per-pattern application rows + delete bridge
+    try {
+      const bridgeRow = db.prepare(`
+        SELECT key, value FROM kv_store
+        WHERE namespace = 'task-bridge'
+          AND (expires_at IS NULL OR expires_at > strftime('%s','now') * 1000)
+        ORDER BY created_at DESC
+        LIMIT 1
+      `).get() as { key: string; value: string } | undefined;
+
+      if (bridgeRow?.value) {
+        try {
+          bridge = JSON.parse(bridgeRow.value) as TaskBridgePayload;
+        } catch {
+          bridge = null;
+        }
+      }
+
+      if (bridge && Array.isArray(bridge.selectedPatternIds) && bridge.selectedPatternIds.length > 0) {
+        const perPatternTokens = bridge.estimatedTokenSavings && bridge.selectedPatternIds.length
+          ? Math.round(bridge.estimatedTokenSavings / bridge.selectedPatternIds.length)
+          : 0;
+        const insertApp = db.prepare(`
+          INSERT INTO experience_applications
+            (id, experience_id, task, success, tokens_saved, feedback, applied_at)
+          VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+        `);
+        for (const patternId of bridge.selectedPatternIds) {
+          insertApp.run(
+            `app-${Date.now()}-${randomUUID().slice(0, 8)}`,
+            experienceId,
+            `${taskField}:pattern:${patternId}`,
+            opts.success ? 1 : 0,
+            perPatternTokens,
+            `[Patch 160+300] task-bridge pattern_id=${patternId} ts=${perPatternTokens}`,
+          );
+        }
+        // 4. Delete bridge entry (one-shot consumption)
+        if (bridgeRow) {
+          db.prepare(`DELETE FROM kv_store WHERE namespace='task-bridge' AND key = ?`).run(bridgeRow.key);
+        }
+      }
+    } catch (bridgeErr) {
+      console.error(chalk.dim(`[hooks] post-task bridge: ${bridgeErr instanceof Error ? bridgeErr.message : 'unknown'}`));
+    }
+
+    // 5. Single-step qe_trajectories row
+    const trajId = `traj-${Date.now()}-${randomUUID().slice(0, 8)}`;
+    db.prepare(`
+      INSERT INTO qe_trajectories (id, task, agent, domain, started_at, ended_at, success, steps_json)
+      VALUES (?, ?, ?, ?, datetime('now'), datetime('now'), ?, ?)
+    `).run(
+      trajId,
+      taskField,
+      opts.agent,
+      opts.domain ?? 'general',
+      opts.success ? 1 : 0,
+      JSON.stringify([{ step: 1, task: opts.taskId, success: opts.success }]),
+    );
+
+    // 6. Multi-step stitch — siblings sharing the same suffix taskId in the
+    // last hour. Only fires when ≥2 unconsolidated siblings exist.
+    try {
+      const siblings = db.prepare(`
+        SELECT id, task, agent, success, started_at, completed_at
+        FROM captured_experiences
+        WHERE consolidated_into IS NULL
+          AND task LIKE ?
+          AND started_at > datetime('now', '-1 hour')
+        ORDER BY started_at ASC
+      `).all(`%:${opts.taskId}`) as Array<{
+        id: string; task: string; agent: string; success: number;
+        started_at: string; completed_at: string;
+      }>;
+
+      if (siblings.length >= 2) {
+        const multiTrajId = `traj-multi-${Date.now()}-${randomUUID().slice(0, 8)}`;
+        const stepsJson = JSON.stringify(
+          siblings.map((s, i) => ({
+            step: i + 1,
+            task: s.task,
+            agent: s.agent,
+            success: !!s.success,
+            started_at: s.started_at,
+            completed_at: s.completed_at,
+          })),
+        );
+        const allSuccess = siblings.every((s) => !!s.success);
+        db.prepare(`
+          INSERT INTO qe_trajectories (id, task, agent, domain, started_at, ended_at, success, steps_json)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          multiTrajId,
+          `multi:${opts.taskId}`,
+          opts.agent,
+          opts.domain ?? 'general',
+          siblings[0].started_at,
+          siblings[siblings.length - 1].completed_at,
+          allSuccess ? 1 : 0,
+          stepsJson,
+        );
+        const placeholders = siblings.map(() => '?').join(',');
+        db.prepare(
+          `UPDATE captured_experiences SET consolidated_into = ? WHERE id IN (${placeholders})`,
+        ).run(multiTrajId, ...siblings.map((s) => s.id));
+        stitchedSiblings = siblings.length;
+      }
+    } catch (stitchErr) {
+      console.error(chalk.dim(`[hooks] post-task stitch: ${stitchErr instanceof Error ? stitchErr.message : 'unknown'}`));
+    }
+
+    // 7. dream_insights.applied counter — only on success
+    if (opts.success) {
+      try {
+        const result = db.prepare(`
+          UPDATE dream_insights
+          SET applied = COALESCE(applied, 0) + 1
+          WHERE id IN (
+            SELECT id FROM dream_insights
+            WHERE actionable = 1
+            ORDER BY created_at DESC
+            LIMIT 3
+          )
+        `).run();
+        insightsApplied = result.changes ?? 0;
+      } catch {
+        // dream_insights may not exist on minimal schemas
+      }
+    }
+  });
+
+  try {
+    txn();
+  } catch (error) {
+    console.error(chalk.dim(`[hooks] persistTaskOutcome txn: ${error instanceof Error ? error.message : 'unknown'}`));
+  }
+
+  return {
+    experienceId,
+    qualityScore,
+    bridge,
+    stitchedSiblings,
+    insightsApplied,
+  };
+}
+
+/**
+ * Q-learning Bellman update for the hook-router state-action pair.
+ *
+ * Aligned to ADR-061/087:
+ *   - algorithm='q-learning' (not 'asymmetric-hebbian'; that label is for
+ *     ReasoningBank confidence updates, not Q-learning)
+ *   - agent_id='aqe-hook-router' (per-instance partition; persistent-q-router
+ *     convention so we don't collide with canonical RuVector q-router writes
+ *     at agent_id='q-router')
+ *   - state_key='${taskType}|${priority}|${domain}|${complexityBucket}'
+ *     (structural; see q-learning-router.ts:591)
+ *   - action_key=agent name chosen
+ *   - id='q-learning:aqe-hook-router:${stateKey}:${actionKey}'
+ *
+ * Update: Q ← Q + α(r + γ·max_a' Q(s',a') − Q) with α=0.1, γ=0.9.
+ * Reward: success +0.1, failure −1.0 (asymmetric per ADR-061).
+ *
+ * Best-effort — failures swallowed to keep post-task hook responsive.
+ */
+export async function updateHookRouterQValue(opts: {
+  taskType: string;
+  priority: string;
+  domain: string;
+  complexityBucket: number;
+  agent: string;
+  success: boolean;
+}): Promise<void> {
+  try {
+    const { getUnifiedMemory } = await import('../../../kernel/unified-memory.js');
+    const um = getUnifiedMemory();
+    if (!um.isInitialized()) {
+      await um.initialize();
+    }
+    const db = um.getDatabase();
+    try { db.pragma('busy_timeout = 60000'); } catch { /* hook-side patient timeout (ADR-001 / patch 260) */ }
+
+    const stateKey = `${opts.taskType}|${opts.priority}|${opts.domain || 'any'}|${opts.complexityBucket}`;
+    const actionKey = opts.agent;
+    const id = `q-learning:aqe-hook-router:${stateKey}:${actionKey}`;
+    const reward = opts.success ? 0.1 : -1.0;
+    const alpha = 0.1;
+    const gamma = 0.9;
+
+    const existing = db.prepare(`
+      SELECT q_value FROM rl_q_values WHERE id = ?
+    `).get(id) as { q_value: number } | undefined;
+    const oldQ = (existing && typeof existing.q_value === 'number') ? existing.q_value : 0;
+
+    const futureRow = db.prepare(`
+      SELECT MAX(q_value) AS m FROM rl_q_values WHERE state_key = ?
+    `).get(stateKey) as { m: number | null } | undefined;
+    const futureMaxQ = (futureRow && typeof futureRow.m === 'number') ? futureRow.m : 0;
+
+    // Bellman update
+    const newQ = oldQ + alpha * (reward + gamma * futureMaxQ - oldQ);
+
+    db.prepare(`
+      INSERT INTO rl_q_values
+        (id, algorithm, agent_id, state_key, action_key, q_value, visits, last_reward, domain, created_at, updated_at)
+      VALUES (?, 'q-learning', 'aqe-hook-router', ?, ?, ?, 1, ?, ?, datetime('now'), datetime('now'))
+      ON CONFLICT(algorithm, agent_id, state_key, action_key) DO UPDATE SET
+        q_value = excluded.q_value,
+        visits = visits + 1,
+        last_reward = excluded.last_reward,
+        updated_at = datetime('now')
+    `).run(id, stateKey, actionKey, newQ, reward, opts.domain || 'any');
+  } catch (error) {
+    console.error(chalk.dim(`[hooks] q-learning update: ${error instanceof Error ? error.message : 'unknown'}`));
+  }
+}
+
+/**
+ * Update the routing_outcomes sentinel row that pre-task wrote with
+ * quality=-1, success=0. Patch 150: applies the 6-dim outcome quality and
+ * success bit to the most-recent pending sentinel matching the agent.
+ *
+ * Best-effort — no-op when no sentinel found.
+ */
+export async function updateRoutingOutcomeQuality(opts: {
+  agent: string;
+  success: boolean;
+  durationMs: number;
+  qualityScore: number;
+}): Promise<void> {
+  try {
+    const { getUnifiedMemory } = await import('../../../kernel/unified-memory.js');
+    const um = getUnifiedMemory();
+    if (!um.isInitialized()) {
+      await um.initialize();
+    }
+    const db = um.getDatabase();
+    try { db.pragma('busy_timeout = 60000'); } catch { /* hook-side patient timeout (ADR-001 / patch 260) */ }
+    db.prepare(`
+      UPDATE routing_outcomes
+      SET success = ?, quality_score = ?, duration_ms = ?
+      WHERE id IN (
+        SELECT id FROM routing_outcomes
+        WHERE quality_score = -1
+          AND created_at > datetime('now', '-30 minutes')
+        ORDER BY (CASE WHEN used_agent = ? THEN 0 ELSE 1 END), created_at DESC
+        LIMIT 1
+      )
+    `).run(
+      opts.success ? 1 : 0,
+      opts.qualityScore,
+      opts.durationMs,
+      opts.agent,
+    );
+  } catch (error) {
+    console.error(chalk.dim(`[hooks] routing UPDATE: ${error instanceof Error ? error.message : 'unknown'}`));
+  }
+}
+
+/**
  * Lightweight experience-to-pattern consolidation.
  * Aggregates captured_experiences by domain+agent, and for clusters that meet
  * quality thresholds, creates new qe_patterns entries.
@@ -216,6 +596,7 @@ export async function consolidateExperiencesToPatterns(): Promise<number> {
     await um.initialize();
   }
   const db = um.getDatabase();
+  try { db.pragma('busy_timeout = 60000'); } catch { /* hook-side patient timeout (ADR-001 / patch 260) */ }
 
   // Ensure consolidation columns exist (may be missing on older DBs)
   const existingCols = new Set(
@@ -300,6 +681,8 @@ export async function consolidateExperiencesToPatterns(): Promise<number> {
         const patternId = uuidv4();
         const confidence = Math.min(0.95, agg.avg_quality * 0.8 + agg.success_rate * 0.2);
         const qualityScore = confidence * 0.3 + (Math.min(agg.cnt, 100) / 100) * 0.2 + agg.success_rate * 0.5;
+        const description = `Auto-consolidated from ${agg.cnt} experiences. Agent: ${agg.agent}, success rate: ${(agg.success_rate * 100).toFixed(0)}%`;
+        const tags = (agg.sources || '').split(',').filter(Boolean);
 
         db.prepare(`
           INSERT INTO qe_patterns (
@@ -313,16 +696,22 @@ export async function consolidateExperiencesToPatterns(): Promise<number> {
           agg.domain,
           agg.domain,
           patternName,
-          `Auto-consolidated from ${agg.cnt} experiences. Agent: ${agg.agent}, success rate: ${(agg.success_rate * 100).toFixed(0)}%`,
+          description,
           confidence,
           agg.cnt,
           agg.success_rate,
           qualityScore,
           'short-term',
           JSON.stringify({ type: 'workflow', content: `${agg.agent} pattern for ${agg.domain}`, variables: [] }),
-          JSON.stringify({ tags: (agg.sources || '').split(','), sourceType: 'session-consolidation', extractedAt: new Date().toISOString() }),
+          JSON.stringify({ tags, sourceType: 'session-consolidation', extractedAt: new Date().toISOString() }),
           agg.successes
         );
+
+        // Pair the qe_patterns row with an embedding so HNSW pattern recall
+        // doesn't see this as a "ghost" (ADR-058 embedding-locality). Fail-soft.
+        const { ensurePatternEmbedding } = await import('../../../learning/embed-and-insert-pattern.js');
+        await ensurePatternEmbedding(db, patternId, patternName, description, tags);
+
         created++;
       }
 

@@ -4,6 +4,7 @@ All Agentic QE release notes organized by version.
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| [v3.9.19](v3.9.19.md) | 2026-05-05 | Self-learning loop wire-gap fixes: workers tick, HNSW loads on boot, hook outputs persist, multi-dim quality |
 | [v3.9.18](v3.9.18.md) | 2026-04-30 | Four MCP fixes (governance throttle, jest output, temp-path leak, coverage error msg) + `agentic-qe-fleet` plugin |
 | [v3.9.17](v3.9.17.md) | 2026-04-27 | Fix: UserPromptSubmit hook now reads stdin event JSON — closes the routing learning loop for fresh `aqe init` |
 | [v3.9.16](v3.9.16.md) | 2026-04-24 | Brain-export tooling: `aqe brain diff`/`search`, native-binding advisor `aqe upgrade` |
