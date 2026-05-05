@@ -208,7 +208,12 @@ async function main(): Promise<void> {
     // IMP-10: Start background workers (heartbeat scheduler, etc.)
     try {
       const { getDaemon } = await import('../workers/daemon.js');
-      const daemon = getDaemon({ autoStart: false });
+      // ADR-001 Bug A fix (Jordi/AQE_RUFLO patch 250): restore canonical default.
+      // `getDaemon({ autoStart: false })` neutered workerManager.startAll() — the only
+      // call path that schedules per-worker setInterval timers. Workers registered but
+      // never ticked. DEFAULT_CONFIG.autoStart=true (workers/daemon.ts:53) is the
+      // contracted default; matches the shutdownDaemon() call at entry.ts:44.
+      const daemon = getDaemon();
       await daemon.start();
       const status = daemon.getStatus();
       originalStderrWrite(`[MCP] Background workers started (${status.workerManager.totalWorkers} workers)\n`);
