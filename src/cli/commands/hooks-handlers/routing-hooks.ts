@@ -13,6 +13,7 @@ import type { QERoutingRequest } from '../../../learning/qe-reasoning-bank.js';
 import type { QEDomain } from '../../../learning/qe-patterns.js';
 import { findProjectRoot } from '../../../kernel/unified-memory.js';
 import {
+  applyHookBusyTimeout,
   getHooksSystem,
   createHybridBackendWithTimeout,
   incrementDreamExperience,
@@ -172,12 +173,14 @@ export function registerRoutingHooks(hooks: Command): void {
             await um.initialize();
           }
           const db = um.getDatabase();
+          applyHookBusyTimeout(db);
           const outcomeId = `route-${Date.now()}-${randomUUID().slice(0, 8)}`;
-          // AQE_RUFLO patch 150: split-write semantics. quality_score now means
-          // "outcome quality after task ran" (6-dim formula), NOT routing
-          // confidence. Routing-confidence stays in decision_json. We write a
-          // sentinel here so post-task UPDATE can fill the actual quality.
-          // lowConfidence flag (patch 320) is also captured in decision_json.
+          // Split-write semantics: quality_score means "outcome quality after
+          // task ran" (6-dim formula), NOT routing confidence. Routing-
+          // confidence stays in decision_json. We write a sentinel
+          // (success=0, quality_score=-1) so post-task UPDATE fills the actual
+          // quality. lowConfidence is surfaced via decision_json + the error
+          // column so it's visible in queries that don't parse JSON.
           const lowConfidence = routing.confidence < 0.5;
           db.prepare(`
             INSERT OR REPLACE INTO routing_outcomes (

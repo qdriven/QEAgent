@@ -12,6 +12,7 @@ import path from 'node:path';
 import { QE_HOOK_EVENTS } from '../../../learning/qe-hooks.js';
 import { findProjectRoot, getUnifiedMemory } from '../../../kernel/unified-memory.js';
 import {
+  applyHookBusyTimeout,
   getHooksSystem,
   createHybridBackendWithTimeout,
   incrementDreamExperience,
@@ -107,6 +108,7 @@ export function registerTaskHooks(hooks: Command): void {
             await um.initialize();
           }
           const db = um.getDatabase();
+          applyHookBusyTimeout(db);
 
           // Patch 090: best-historical-agent across past successful routes
           try {

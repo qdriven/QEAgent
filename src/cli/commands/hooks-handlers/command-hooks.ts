@@ -13,6 +13,7 @@ import path from 'node:path';
 import { QE_HOOK_EVENTS } from '../../../learning/qe-hooks.js';
 import { findProjectRoot, getUnifiedMemory } from '../../../kernel/unified-memory.js';
 import {
+  applyHookBusyTimeout,
   getHooksSystem,
   createHybridBackendWithTimeout,
   incrementDreamExperience,
@@ -50,6 +51,7 @@ async function persistTestAndCoverage(opts: {
       await um.initialize();
     }
     const db = um.getDatabase();
+    applyHookBusyTimeout(db);
 
     const language = opts.framework === 'pytest' ? 'python' : 'javascript';
     const cmdSlug = opts.command.split(/\s+/).slice(0, 3).join('-').slice(0, 80);
@@ -341,12 +343,11 @@ export function registerCommandHooks(hooks: Command): void {
           });
           patternsLearned = 1;
 
-          // Persist as captured experience — gated to test/build/lint commands.
-          // AQE_RUFLO patch 310: previously persisted unconditionally, which
-          // flooded captured_experiences with noise rows from every git/ls/etc
-          // call (Jordi observed 875+ noise rows at 8.2% success rate diluting
-          // pattern signal). reasoningBank.recordOutcome above is the broader
-          // metric path and stays unconditional.
+          // Persist as captured experience — gated to test/build/lint commands
+          // so non-test Bash (git, ls, etc.) doesn't flood captured_experiences
+          // with low-success-rate noise that dilutes pattern signal.
+          // reasoningBank.recordOutcome above is the broader metric path and
+          // stays unconditional.
           if (isTestCmd || isBuildCmd || isLintCmd) {
             await persistCommandExperience({
               task: `bash: ${command}`,

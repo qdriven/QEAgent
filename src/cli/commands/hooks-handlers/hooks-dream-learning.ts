@@ -164,6 +164,7 @@ export async function persistCommandExperience(opts: {
       await um.initialize();
     }
     const db = um.getDatabase();
+    try { db.pragma('busy_timeout = 60000'); } catch { /* hook-side patient timeout (ADR-001 / patch 260) */ }
     const id = `cli-${Date.now()}-${randomUUID().slice(0, 8)}`;
 
     // Compute quality based on context rather than binary success/fail.
@@ -239,7 +240,7 @@ export interface TaskOutcomeResult {
 /**
  * Persist a Task() outcome through the full experience pipeline.
  *
- * AQE_RUFLO patches 060/110/120/160/180/300 — all rolled into one helper that:
+ * Pipeline rolled into one helper that:
  *
  *   1. Writes captured_experiences (source='cli-hook-post-task')
  *   2. Reads kv_store task-bridge (selectedPatternIds + estimatedTokenSavings)
@@ -269,6 +270,7 @@ export async function persistTaskOutcome(opts: {
     await um.initialize();
   }
   const db = um.getDatabase();
+  try { db.pragma('busy_timeout = 60000'); } catch { /* hook-side patient timeout (ADR-001 / patch 260) */ }
 
   const experienceId = `exp-${Date.now()}-${randomUUID().slice(0, 8)}`;
   const taskField = `${opts.agent}:${opts.taskId}`;
@@ -471,7 +473,7 @@ export async function persistTaskOutcome(opts: {
 /**
  * Q-learning Bellman update for the hook-router state-action pair.
  *
- * AQE_RUFLO patches 130/190/280 — properly aligned per ADR-061/087:
+ * Aligned to ADR-061/087:
  *   - algorithm='q-learning' (not 'asymmetric-hebbian'; that label is for
  *     ReasoningBank confidence updates, not Q-learning)
  *   - agent_id='aqe-hook-router' (per-instance partition; persistent-q-router
@@ -502,6 +504,7 @@ export async function updateHookRouterQValue(opts: {
       await um.initialize();
     }
     const db = um.getDatabase();
+    try { db.pragma('busy_timeout = 60000'); } catch { /* hook-side patient timeout (ADR-001 / patch 260) */ }
 
     const stateKey = `${opts.taskType}|${opts.priority}|${opts.domain || 'any'}|${opts.complexityBucket}`;
     const actionKey = opts.agent;
@@ -558,6 +561,7 @@ export async function updateRoutingOutcomeQuality(opts: {
       await um.initialize();
     }
     const db = um.getDatabase();
+    try { db.pragma('busy_timeout = 60000'); } catch { /* hook-side patient timeout (ADR-001 / patch 260) */ }
     db.prepare(`
       UPDATE routing_outcomes
       SET success = ?, quality_score = ?, duration_ms = ?
@@ -592,6 +596,7 @@ export async function consolidateExperiencesToPatterns(): Promise<number> {
     await um.initialize();
   }
   const db = um.getDatabase();
+  try { db.pragma('busy_timeout = 60000'); } catch { /* hook-side patient timeout (ADR-001 / patch 260) */ }
 
   // Ensure consolidation columns exist (may be missing on older DBs)
   const existingCols = new Set(
@@ -702,8 +707,8 @@ export async function consolidateExperiencesToPatterns(): Promise<number> {
           agg.successes
         );
 
-        // AQE_RUFLO patch 290: pair the qe_patterns row with an embedding so
-        // HNSW pattern recall doesn't see this as a "ghost". Fail-soft.
+        // Pair the qe_patterns row with an embedding so HNSW pattern recall
+        // doesn't see this as a "ghost" (ADR-058 embedding-locality). Fail-soft.
         const { ensurePatternEmbedding } = await import('../../../learning/embed-and-insert-pattern.js');
         await ensurePatternEmbedding(db, patternId, patternName, description, tags);
 
