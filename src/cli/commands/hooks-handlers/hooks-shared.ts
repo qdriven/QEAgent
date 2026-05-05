@@ -290,8 +290,13 @@ export {
   DREAM_EXPERIENCE_THRESHOLD,
   DREAM_MIN_GAP_MS,
   type DreamHookState,
+  type TaskBridgePayload,
+  type TaskOutcomeResult,
   checkAndTriggerDream,
   incrementDreamExperience,
   persistCommandExperience,
+  persistTaskOutcome,
+  updateHookRouterQValue,
+  updateRoutingOutcomeQuality,
   consolidateExperiencesToPatterns,
 } from './hooks-dream-learning.js';
