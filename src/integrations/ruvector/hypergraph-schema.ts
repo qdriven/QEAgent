@@ -31,9 +31,13 @@ import { safeJsonParse } from '../../shared/safe-json.js';
 export type NodeType = 'function' | 'module' | 'test' | 'file' | 'class';
 
 /**
- * Valid edge types in the hypergraph
+ * Valid edge types in the hypergraph.
+ *
+ * - `contains`: file → entity (function/class/etc) containment edge.
+ *   Without this, `findUntestedFunctions`, `findImpactedTests`, and
+ *   `findCoverageGaps` return empty regardless of indexing activity.
  */
-export type EdgeType = 'calls' | 'imports' | 'tests' | 'depends_on' | 'covers';
+export type EdgeType = 'calls' | 'imports' | 'tests' | 'depends_on' | 'covers' | 'contains';
 
 /**
  * Represents a node in the hypergraph (code entity)
