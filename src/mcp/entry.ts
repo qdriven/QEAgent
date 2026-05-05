@@ -205,14 +205,29 @@ async function main(): Promise<void> {
     });
     originalStderrWrite('[MCP] Ready\n');
 
+    // Eagerly initialize CrossPhaseHooks so kv_store / qcsd-memory rows
+    // actually grow under sustained queen-event-handlers traffic. The lazy
+    // singleton in hooks/cross-phase-hooks.ts is created on first use, but
+    // its initialize() (config-load + memory wiring) only runs when
+    // explicitly called. Doing it here means hook events fire through a
+    // fully-initialized executor from the first MCP request.
+    try {
+      const { getCrossPhaseHookExecutor } = await import('../hooks/cross-phase-hooks.js');
+      await getCrossPhaseHookExecutor().initialize();
+      originalStderrWrite('[MCP] CrossPhaseHooks initialized (eager init via patch 010)\n');
+    } catch (cpErr) {
+      originalStderrWrite(`[MCP] WARNING: CrossPhaseHooks eager init failed: ${cpErr instanceof Error ? cpErr.message : 'unknown'}\n`);
+    }
+
     // IMP-10: Start background workers (heartbeat scheduler, etc.)
     try {
       const { getDaemon } = await import('../workers/daemon.js');
-      // ADR-001 Bug A fix (Jordi/AQE_RUFLO patch 250): restore canonical default.
-      // `getDaemon({ autoStart: false })` neutered workerManager.startAll() — the only
-      // call path that schedules per-worker setInterval timers. Workers registered but
-      // never ticked. DEFAULT_CONFIG.autoStart=true (workers/daemon.ts:53) is the
-      // contracted default; matches the shutdownDaemon() call at entry.ts:44.
+      // ADR-001 Bug A fix: use the canonical getDaemon() default. Passing
+      // `{ autoStart: false }` here would neuter workerManager.startAll() —
+      // the only call path that schedules per-worker setInterval timers, so
+      // workers would register but never tick. DEFAULT_CONFIG.autoStart=true
+      // (workers/daemon.ts) is the contracted default; matches the
+      // shutdownDaemon() call site above.
       const daemon = getDaemon();
       await daemon.start();
       const status = daemon.getStatus();
