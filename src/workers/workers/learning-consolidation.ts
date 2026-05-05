@@ -407,6 +407,7 @@ export class LearningConsolidationWorker extends BaseWorker {
         try {
           const { v4: uuidv4 } = await import('uuid');
           const patternId = uuidv4();
+          const description = `Auto-extracted pattern from ${candidate.sourceExperiences} experiences. Avg reward: ${candidate.avgReward.toFixed(3)}`;
 
           db.prepare(`
             INSERT INTO qe_patterns (
@@ -420,7 +421,7 @@ export class LearningConsolidationWorker extends BaseWorker {
             candidate.domain,
             candidate.domain, // AQE domain same as QE domain
             candidate.name,
-            `Auto-extracted pattern from ${candidate.sourceExperiences} experiences. Avg reward: ${candidate.avgReward.toFixed(3)}`,
+            description,
             candidate.confidence,
             candidate.sourceExperiences,
             candidate.successRate,
@@ -438,6 +439,11 @@ export class LearningConsolidationWorker extends BaseWorker {
             }),
             Math.round(candidate.sourceExperiences * candidate.successRate)
           );
+
+          // AQE_RUFLO patch 290: pair the qe_patterns row with an embedding so
+          // HNSW pattern recall doesn't see this as a "ghost". Fail-soft.
+          const { ensurePatternEmbedding } = await import('../../learning/embed-and-insert-pattern.js');
+          await ensurePatternEmbedding(db, patternId, candidate.name, description, candidate.actions);
 
           created++;
         } catch (error) {

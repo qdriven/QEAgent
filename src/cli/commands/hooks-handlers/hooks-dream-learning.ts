@@ -300,6 +300,8 @@ export async function consolidateExperiencesToPatterns(): Promise<number> {
         const patternId = uuidv4();
         const confidence = Math.min(0.95, agg.avg_quality * 0.8 + agg.success_rate * 0.2);
         const qualityScore = confidence * 0.3 + (Math.min(agg.cnt, 100) / 100) * 0.2 + agg.success_rate * 0.5;
+        const description = `Auto-consolidated from ${agg.cnt} experiences. Agent: ${agg.agent}, success rate: ${(agg.success_rate * 100).toFixed(0)}%`;
+        const tags = (agg.sources || '').split(',').filter(Boolean);
 
         db.prepare(`
           INSERT INTO qe_patterns (
@@ -313,16 +315,22 @@ export async function consolidateExperiencesToPatterns(): Promise<number> {
           agg.domain,
           agg.domain,
           patternName,
-          `Auto-consolidated from ${agg.cnt} experiences. Agent: ${agg.agent}, success rate: ${(agg.success_rate * 100).toFixed(0)}%`,
+          description,
           confidence,
           agg.cnt,
           agg.success_rate,
           qualityScore,
           'short-term',
           JSON.stringify({ type: 'workflow', content: `${agg.agent} pattern for ${agg.domain}`, variables: [] }),
-          JSON.stringify({ tags: (agg.sources || '').split(','), sourceType: 'session-consolidation', extractedAt: new Date().toISOString() }),
+          JSON.stringify({ tags, sourceType: 'session-consolidation', extractedAt: new Date().toISOString() }),
           agg.successes
         );
+
+        // AQE_RUFLO patch 290: pair the qe_patterns row with an embedding so
+        // HNSW pattern recall doesn't see this as a "ghost". Fail-soft.
+        const { ensurePatternEmbedding } = await import('../../../learning/embed-and-insert-pattern.js');
+        await ensurePatternEmbedding(db, patternId, patternName, description, tags);
+
         created++;
       }
 
