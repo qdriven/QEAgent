@@ -432,9 +432,19 @@ export class DomainTaskExecutor implements TaskHandlerContext {
         `model=${getModelForTier(tier)}, success=${success}, duration=${durationMs}ms`
       );
 
-      // ADR-023: Record routing outcome for learning feedback loop
+      // ADR-023: Record routing outcome for learning feedback loop.
+      // qualityScore uses the 6-dim outcome formula (matches the post-task
+      // hook UPDATE path) instead of a binary success?0.8:0.2.
       if (this.qualityFeedbackLoop) {
         const targetDomains = task.targetDomains || [];
+        const successScore = success ? 1 : 0;
+        const durationTier =
+          durationMs < 100 ? 1.0 :
+          durationMs < 500 ? 0.8 :
+          durationMs < 2000 ? 0.6 :
+          durationMs < 5000 ? 0.4 :
+          durationMs < 10000 ? 0.2 : 0.1;
+        const qualityScore = 0.25 * successScore + 0.325 + 0.10 * durationTier;
         await this.qualityFeedbackLoop.recordRoutingOutcome({
           taskId: task.id,
           taskDescription: task.type,
@@ -442,7 +452,7 @@ export class DomainTaskExecutor implements TaskHandlerContext {
           usedAgent: String(tier),
           followedRecommendation: true,
           success,
-          qualityScore: success ? 0.8 : 0.2,
+          qualityScore,
           durationMs,
           timestamp: new Date(),
           error: success ? undefined : 'Task execution failed',
