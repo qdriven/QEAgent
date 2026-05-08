@@ -383,6 +383,19 @@ export async function handleTaskOrchestrate(
           executionStrategy: routingResult.executionStrategy,
           complexity: routingResult.decision.complexityAnalysis.overall,
         },
+        // HNSW A pattern hints (mirrors the submitTask payload below); the
+        // workflow branch routes through executeWorkflow, so the same catalog
+        // of consolidated long-term patterns should reach it.
+        patternHints: patternHintMatches.length > 0
+          ? patternHintMatches.map(p => ({
+              patternId: p.id,
+              name: p.name,
+              description: p.description,
+              confidence: p.confidence,
+              similarity: p.qualityScore,
+              canReuse: p.tier === 'long-term',
+            }))
+          : undefined,
       };
 
       const workflowResult = await workflowOrchestrator.executeWorkflow(workflowId, workflowInput);
