@@ -31,6 +31,7 @@ import {
 } from '../services/reasoning-bank-service';
 import type { ModelTier } from '../../integrations/agentic-flow';
 import type { QEDomain, QEPattern } from '../../learning/qe-patterns.js';
+import { scoreUnjudgedTrajectories } from './trajectory-judge.js';
 import { toErrorMessage } from '../../shared/error-utils.js';
 
 // ============================================================================
@@ -491,6 +492,17 @@ export async function handleTaskOrchestrate(
     // Issue N1: Trajectory auto-close is handled by subscribeTrajectoryEvents(),
     // which listens for TaskCompleted/TaskFailed on the event router.
     // No per-task polling needed.
+
+    // Trajectory judge: opt-in LLM scoring of recent unscored trajectories.
+    // TrajectoryBridge writes to a separate trajectories.db; the hook-created
+    // rows in memory.db are unreachable from it, so feedback never lands. This
+    // catches up by scoring ≤5 trajectories per task_orchestrate call.
+    // Opt-in (AQE_TRAJECTORY_JUDGE=1) because it makes paid LLM calls.
+    if (process.env.AQE_TRAJECTORY_JUDGE === '1' && process.env.ANTHROPIC_API_KEY) {
+      void scoreUnjudgedTrajectories().catch(err => {
+        console.warn('[TrajectoryJudge] failed:', err instanceof Error ? err.message : err);
+      });
+    }
 
     return {
       success: true,
