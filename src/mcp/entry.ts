@@ -219,6 +219,21 @@ async function main(): Promise<void> {
       originalStderrWrite(`[MCP] WARNING: CrossPhaseHooks eager init failed: ${cpErr instanceof Error ? cpErr.message : 'unknown'}\n`);
     }
 
+    // Pre-warm ReasoningBankService so HNSW A is populated before the first
+    // task_orchestrate arrives. Fire-and-forget: getReasoningBankService()
+    // builds the singleton + EnhancedReasoningBankAdapter.initialize() +
+    // HNSW A index population. Without this, the first task_orchestrate pays
+    // the cold-start cost and routing falls through to context-only matches.
+    void (async () => {
+      try {
+        const { getReasoningBankService } = await import('./services/reasoning-bank-service.js');
+        await getReasoningBankService();
+        originalStderrWrite('[MCP] ReasoningBank prewarmed\n');
+      } catch (rbErr) {
+        originalStderrWrite(`[MCP] WARNING: ReasoningBank prewarm failed: ${rbErr instanceof Error ? rbErr.message : 'unknown'}\n`);
+      }
+    })();
+
     // IMP-10: Start background workers (heartbeat scheduler, etc.)
     try {
       const { getDaemon } = await import('../workers/daemon.js');
