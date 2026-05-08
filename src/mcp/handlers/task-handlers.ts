@@ -494,10 +494,10 @@ export async function handleTaskOrchestrate(
     // No per-task polling needed.
 
     // Trajectory judge: opt-in LLM scoring of recent unscored trajectories.
-    // TrajectoryBridge writes to a separate trajectories.db; the hook-created
-    // rows in memory.db are unreachable from it, so feedback never lands. This
-    // catches up by scoring ≤5 trajectories per task_orchestrate call.
-    // Opt-in (AQE_TRAJECTORY_JUDGE=1) because it makes paid LLM calls.
+    // Hook-created rows in qe_trajectories never receive feedback unless
+    // something goes back and judges them. This catches up by scoring ≤5
+    // rows per task_orchestrate call. Opt-in (AQE_TRAJECTORY_JUDGE=1)
+    // because it makes paid LLM calls.
     if (process.env.AQE_TRAJECTORY_JUDGE === '1' && process.env.ANTHROPIC_API_KEY) {
       void scoreUnjudgedTrajectories().catch(err => {
         console.warn('[TrajectoryJudge] failed:', err instanceof Error ? err.message : err);

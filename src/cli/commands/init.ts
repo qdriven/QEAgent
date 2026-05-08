@@ -323,7 +323,9 @@ async function runReset(options: ResetOptions): Promise<void> {
   ];
 
   if (options.all) {
-    // Also delete data files
+    // Also delete data files. patterns.db / trajectories.db are pre-unified
+    // legacy paths kept here so `reset --all` still cleans them up on
+    // upgraded installs; the live writers all target memory.db now.
     filesToReset.push(
       path.join(aqeDir, 'memory.db'),
       path.join(aqeDir, 'patterns.db'),

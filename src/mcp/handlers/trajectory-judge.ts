@@ -1,12 +1,10 @@
 /**
  * Trajectory Judge — opt-in LLM scoring of unscored qe_trajectories rows.
  *
- * TrajectoryBridge writes feedback to a separate trajectories.db, so the
- * hook-created rows that land in memory.db never receive scores. This helper
- * picks ≤5 unscored rows per call, asks Claude Haiku to score them, and writes
- * a structured feedback JSON back into qe_trajectories.feedback. Quality is
- * embedded in the feedback JSON since the table has no `quality` column on the
- * canonical schema.
+ * Picks ≤5 rows where feedback IS NULL AND ended_at IS NOT NULL, asks Claude
+ * Haiku to score them, and writes a structured feedback JSON back into
+ * qe_trajectories.feedback. Quality is embedded in the feedback JSON since
+ * the canonical schema has no `quality` column.
  *
  * Uses the proxy-aware path from patch 380 (ANTHROPIC_BASE_URL) so this honors
  * any local proxy in front of api.anthropic.com.
