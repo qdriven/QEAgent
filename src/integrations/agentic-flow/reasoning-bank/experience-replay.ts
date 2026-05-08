@@ -262,6 +262,83 @@ export class ExperienceReplay {
     // Load embeddings into memory index
     await this.loadEmbeddingIndex();
 
+    // Backfill missing embeddings on captured_experiences. Hook-side INSERT
+    // paths (sources: cli-hook-post-command, patch-060-post-task, etc.)
+    // bypass storeExperience() and never call computeRealEmbedding(),
+    // leaving HNSW C cold. Fire-and-forget so init isn't blocked; cap=200
+    // per boot to bound work.
+    void (async () => {
+      try {
+        if (!this.db) return;
+        const ghosts = this.db.prepare(`
+          SELECT id, domain, task FROM captured_experiences
+          WHERE embedding IS NULL AND consolidated_into IS NULL
+          LIMIT 200
+        `).all() as Array<{ id: string; domain: string | null; task: string }>;
+        if (ghosts.length === 0) return;
+        const updateStmt = this.db.prepare(`
+          UPDATE captured_experiences
+          SET embedding = ?, embedding_dimension = ?
+          WHERE id = ?
+        `);
+        let written = 0;
+        for (const row of ghosts) {
+          const text = `${row.domain ?? ''}: ${row.task}`.slice(0, 512);
+          const embedding = await computeRealEmbedding(text);
+          const buf = Buffer.from(new Float32Array(embedding).buffer);
+          updateStmt.run(buf, embedding.length, row.id);
+          // Add to live HNSW so freshly-embedded rows are immediately searchable
+          const hnswId = this.nextHnswId++;
+          this.hnswIndex.addEmbedding({
+            vector: embedding,
+            dimension: 384,
+            namespace: 'experiences',
+            text: row.id,
+            timestamp: Date.now(),
+            quantization: 'none',
+            metadata: {},
+          }, hnswId);
+          this.idToExperienceId.set(hnswId, row.id);
+          this.experienceIdToHnswId.set(row.id, hnswId);
+          written++;
+        }
+        console.log(`[ExperienceReplay] Backfilled ${written} captured_experiences embeddings`);
+      } catch (err) {
+        console.warn('[ExperienceReplay] Embedding backfill failed:', err instanceof Error ? err.message : err);
+      }
+    })();
+
+    // Backfill missing embeddings on qe_trajectories. TrajectoryTracker.endTrajectory()
+    // writes embedding=NULL with no follow-up worker; hook-side trajectory inserts
+    // (cli-hook-post-task) also leave the column NULL. Without this, kNN over
+    // historical trajectories collapses to "no candidates" and ReasoningBank
+    // can't surface similar past runs. Fail-soft when embedding column is absent
+    // (TrajectoryTracker may not have run its schema migration yet).
+    void (async () => {
+      try {
+        if (!this.db) return;
+        const cols = this.db.prepare("PRAGMA table_info(qe_trajectories)").all() as Array<{ name: string }>;
+        if (!cols.some(c => c.name === 'embedding')) return;
+        const rows = this.db.prepare(`
+          SELECT id, domain, task FROM qe_trajectories
+          WHERE embedding IS NULL AND ended_at IS NOT NULL
+          LIMIT 200
+        `).all() as Array<{ id: string; domain: string | null; task: string }>;
+        if (rows.length === 0) return;
+        const updateStmt = this.db.prepare(`UPDATE qe_trajectories SET embedding = ? WHERE id = ?`);
+        let written = 0;
+        for (const row of rows) {
+          const text = `${row.domain ?? ''}: ${row.task}`.slice(0, 512);
+          const embedding = await computeRealEmbedding(text);
+          updateStmt.run(Buffer.from(new Float32Array(embedding).buffer), row.id);
+          written++;
+        }
+        console.log(`[ExperienceReplay] Backfilled ${written} qe_trajectories embeddings`);
+      } catch (err) {
+        console.warn('[ExperienceReplay] Trajectory embedding backfill failed:', err instanceof Error ? err.message : err);
+      }
+    })();
+
     // Initialize reservoir buffer if feature flag is enabled (R10, ADR-087)
     if (getRuVectorFeatureFlags().useReservoirReplay) {
       this.reservoirBuffer = new ReservoirReplayBuffer<Experience>({ capacity: 10_000 });

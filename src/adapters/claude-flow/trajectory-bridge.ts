@@ -170,58 +170,55 @@ export class TrajectoryBridge {
   }
 
   /**
-   * Persist trajectory to local SQLite
+   * Persist trajectory to the unified memory DB (qe_trajectories).
+   *
+   * Previously opened a separate `.agentic-qe/trajectories.db` with its own
+   * `trajectories` schema, violating the project's "one DB, one schema"
+   * unified-memory rule. The canonical `qe_trajectories` table on memory.db
+   * already covers every column we need (task/agent/domain/steps_json/
+   * success/feedback) so the bridge now writes there directly.
+   *
+   * Started/completed timestamps are stored in memory.db as TEXT datetimes,
+   * not epoch ms — convert on the way in. Feedback column is added lazily by
+   * TrajectoryTracker.ensureSchema(); we add it here too in case this writer
+   * runs before TrajectoryTracker initializes.
    */
   private async persistTrajectory(trajectory: Trajectory): Promise<void> {
     try {
-      const { join } = await import('path');
-      const { existsSync, mkdirSync } = await import('fs');
-      const { createRequire } = await import('module');
-
-      const require = createRequire(import.meta.url);
-      const { openDatabase } = require('../../shared/safe-db.js');
-
-      const dbPath = join(this.options.projectRoot, '.agentic-qe', 'trajectories.db');
-      const dir = join(this.options.projectRoot, '.agentic-qe');
-
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
+      const { getUnifiedMemory } = await import('../../kernel/unified-memory.js');
+      const um = getUnifiedMemory();
+      if (!um.isInitialized()) {
+        await um.initialize();
       }
+      const db = um.getDatabase();
 
-      const db = openDatabase(dbPath);
+      // Ensure feedback column exists (TrajectoryTracker.ensureSchema may not
+      // have run yet on a fresh install).
+      try {
+        const cols = db.prepare('PRAGMA table_info(qe_trajectories)').all() as Array<{ name: string }>;
+        if (!cols.some(c => c.name === 'feedback')) {
+          db.exec('ALTER TABLE qe_trajectories ADD COLUMN feedback TEXT');
+        }
+      } catch { /* fail-soft */ }
 
-      // Create table if needed
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS trajectories (
-          id TEXT PRIMARY KEY,
-          task TEXT NOT NULL,
-          agent TEXT,
-          steps TEXT NOT NULL,
-          success INTEGER,
-          feedback TEXT,
-          started_at INTEGER NOT NULL,
-          completed_at INTEGER,
-          created_at INTEGER DEFAULT (strftime('%s', 'now') * 1000)
-        );
-        CREATE INDEX IF NOT EXISTS idx_trajectories_success ON trajectories(success);
-      `);
+      const startedIso = new Date(trajectory.startedAt).toISOString();
+      const endedIso = trajectory.completedAt ? new Date(trajectory.completedAt).toISOString() : null;
 
-      // Insert trajectory
       db.prepare(`
-        INSERT OR REPLACE INTO trajectories (id, task, agent, steps, success, feedback, started_at, completed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO qe_trajectories
+          (id, task, agent, domain, started_at, ended_at, success, steps_json, feedback)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         trajectory.id,
         trajectory.task,
         trajectory.agent || null,
-        JSON.stringify(trajectory.steps),
+        null, // domain unknown at this layer
+        startedIso,
+        endedIso,
         trajectory.success ? 1 : 0,
+        JSON.stringify(trajectory.steps),
         trajectory.feedback || null,
-        trajectory.startedAt,
-        trajectory.completedAt || null
       );
-
-      db.close();
     } catch (error) {
       // Non-critical: persistence is optional
       console.debug('[TrajectoryBridge] Trajectory persistence failed:', error instanceof Error ? error.message : error);

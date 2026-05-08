@@ -178,7 +178,7 @@ export class ClaudeModelProvider extends BaseModelProvider {
     }
 
     this.apiKey = apiKey;
-    this.baseUrl = config.baseUrl || 'https://api.anthropic.com';
+    this.baseUrl = config.baseUrl || process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com';
 
     this.config = {
       apiKey,

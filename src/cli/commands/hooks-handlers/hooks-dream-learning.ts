@@ -198,6 +198,20 @@ export async function persistCommandExperience(opts: {
       durationMs,
       opts.source
     );
+
+    // Fire-and-forget embedding write so HNSW C is searchable from the next
+    // boot's loadEmbeddingIndex() without waiting for the patch-350 backfill.
+    // Without this, hook-side writes accumulate as "ghosts" until the next
+    // restart catches them.
+    void (async () => {
+      try {
+        const { computeRealEmbedding } = await import('../../../learning/real-embeddings.js');
+        const text = `${opts.domain}: ${opts.task}`.slice(0, 512);
+        const embedding = await computeRealEmbedding(text);
+        db.prepare(`UPDATE captured_experiences SET embedding = ?, embedding_dimension = ? WHERE id = ?`)
+          .run(Buffer.from(new Float32Array(embedding).buffer), embedding.length, id);
+      } catch { /* fail-soft */ }
+    })();
   } catch (error) {
     // Best-effort — don't fail the hook
     console.error(chalk.dim(`[hooks] persistCommandExperience: ${error instanceof Error ? error.message : 'unknown'}`));
@@ -351,6 +365,25 @@ export async function persistTaskOutcome(opts: {
             (id, experience_id, task, success, tokens_saved, feedback, applied_at)
           VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
         `);
+        // Mirror SQLitePatternStore.recordUsage() so the hook flow updates
+        // qe_patterns.{usage_count, successful_uses, success_rate, quality_score}.
+        // recordUsage() is otherwise only reachable via HandleTaskOutcomeRecord
+        // — never from this hook path — so 88/89 patterns stayed pinned at the
+        // bootstrap quality_score floor (~0.30) and never promoted to long-term.
+        // Quality formula: confidence*0.3 + min(usage_count/100,1)*0.2 + success_rate*0.5
+        const updatePatternUsage = db.prepare(`
+          UPDATE qe_patterns SET
+            usage_count = usage_count + 1,
+            successful_uses = successful_uses + ?,
+            success_rate = CAST(successful_uses + ? AS REAL) / CAST(usage_count + 1 AS REAL),
+            quality_score = ? * 0.3
+              + MIN(CAST(usage_count + 1 AS REAL) / 100.0, 1.0) * 0.2
+              + (CAST(successful_uses + ? AS REAL) / CAST(usage_count + 1 AS REAL)) * 0.5,
+            last_used_at = datetime('now'),
+            updated_at = datetime('now')
+          WHERE id = ?
+        `);
+        const getPatternConfidence = db.prepare(`SELECT confidence FROM qe_patterns WHERE id = ?`);
         for (const patternId of bridge.selectedPatternIds) {
           insertApp.run(
             `app-${Date.now()}-${randomUUID().slice(0, 8)}`,
@@ -360,6 +393,13 @@ export async function persistTaskOutcome(opts: {
             perPatternTokens,
             `[Patch 160+300] task-bridge pattern_id=${patternId} ts=${perPatternTokens}`,
           );
+          try {
+            const row = getPatternConfidence.get(patternId) as { confidence: number } | undefined;
+            if (row) {
+              const successInc = opts.success ? 1 : 0;
+              updatePatternUsage.run(successInc, successInc, row.confidence, successInc, patternId);
+            }
+          } catch { /* fail-soft per pattern */ }
         }
         // 4. Delete bridge entry (one-shot consumption)
         if (bridgeRow) {
@@ -460,6 +500,19 @@ export async function persistTaskOutcome(opts: {
   } catch (error) {
     console.error(chalk.dim(`[hooks] persistTaskOutcome txn: ${error instanceof Error ? error.message : 'unknown'}`));
   }
+
+  // Fire-and-forget embedding write for the captured_experiences row inserted
+  // inside the transaction above. Same rationale as the persistCommandExperience
+  // site — without this, post-task writes are ghosts until next-boot backfill.
+  void (async () => {
+    try {
+      const { computeRealEmbedding } = await import('../../../learning/real-embeddings.js');
+      const text = `${opts.domain ?? 'general'}: ${taskField}`.slice(0, 512);
+      const embedding = await computeRealEmbedding(text);
+      db.prepare(`UPDATE captured_experiences SET embedding = ?, embedding_dimension = ? WHERE id = ?`)
+        .run(Buffer.from(new Float32Array(embedding).buffer), embedding.length, experienceId);
+    } catch { /* fail-soft */ }
+  })();
 
   return {
     experienceId,

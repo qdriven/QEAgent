@@ -380,7 +380,7 @@ export class ClaudeProvider implements LLMProvider {
    * Get base URL
    */
   private getBaseUrl(): string {
-    return (this.config.baseUrl ?? 'https://api.anthropic.com').replace(/\/$/, '');
+    return (this.config.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com').replace(/\/$/, '');
   }
 
   /**

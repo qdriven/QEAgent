@@ -352,6 +352,12 @@ export class DreamEngine {
       }
       this.db = this.persistence.getDatabase();
 
+      // ADR-001 Option C: dynamic-import paths in checkAndTriggerDream() open
+      // a fresh handle that the hook/worker busy_timeout pragmas never reach.
+      // 60s patient timeout here keeps dream cycles from failing under WAL
+      // contention from MCP workers (was 71% failure rate observed).
+      try { this.db.pragma('busy_timeout = 60000'); } catch { /* fail-soft */ }
+
       // Migrate legacy schema: rename 'duration' → 'duration_ms' if needed
       this.migrateSchema();
 

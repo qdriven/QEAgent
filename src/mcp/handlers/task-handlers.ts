@@ -30,7 +30,8 @@ import {
   type TaskOutcome,
 } from '../services/reasoning-bank-service';
 import type { ModelTier } from '../../integrations/agentic-flow';
-import type { QEDomain } from '../../learning/qe-patterns.js';
+import type { QEDomain, QEPattern } from '../../learning/qe-patterns.js';
+import { scoreUnjudgedTrajectories } from './trajectory-judge.js';
 import { toErrorMessage } from '../../shared/error-utils.js';
 
 // ============================================================================
@@ -336,6 +337,17 @@ export async function handleTaskOrchestrate(
       params.context?.project as QEDomain | undefined
     );
 
+    // Bring HNSW A (qe_patterns) into the routing decision alongside HNSW C
+    // (experienceGuidance). Without this, only past trajectories influenced
+    // routing — the catalog of consolidated long-term patterns was never
+    // consulted for new tasks. Fail-soft: empty array on error.
+    const patternHintMatches = await reasoningBankService
+      .searchPatterns(params.task, {
+        limit: 5,
+        domain: (params.context?.project as QEDomain | undefined) ?? (inferredDomain as QEDomain | undefined),
+      })
+      .catch(() => [] as QEPattern[]);
+
     // Parse task description to determine task type
     const taskType = inferTaskType(params.task);
     const priority = mapPriority(params.priority || 'medium');
@@ -371,6 +383,19 @@ export async function handleTaskOrchestrate(
           executionStrategy: routingResult.executionStrategy,
           complexity: routingResult.decision.complexityAnalysis.overall,
         },
+        // HNSW A pattern hints (mirrors the submitTask payload below); the
+        // workflow branch routes through executeWorkflow, so the same catalog
+        // of consolidated long-term patterns should reach it.
+        patternHints: patternHintMatches.length > 0
+          ? patternHintMatches.map(p => ({
+              patternId: p.id,
+              name: p.name,
+              description: p.description,
+              confidence: p.confidence,
+              similarity: p.qualityScore,
+              canReuse: p.tier === 'long-term',
+            }))
+          : undefined,
       };
 
       const workflowResult = await workflowOrchestrator.executeWorkflow(workflowId, workflowInput);
@@ -448,6 +473,17 @@ export async function handleTaskOrchestrate(
           confidence: experienceGuidance.confidence,
           tokenSavings: experienceGuidance.estimatedTokenSavings,
         } : undefined,
+        // HNSW A pattern hints for the executing agent
+        patternHints: patternHintMatches.length > 0
+          ? patternHintMatches.map(p => ({
+              patternId: p.id,
+              name: p.name,
+              description: p.description,
+              confidence: p.confidence,
+              similarity: p.qualityScore,
+              canReuse: p.tier === 'long-term',
+            }))
+          : undefined,
       },
       timeout: 600000, // 10 minutes for orchestrated tasks
     });
@@ -469,6 +505,17 @@ export async function handleTaskOrchestrate(
     // Issue N1: Trajectory auto-close is handled by subscribeTrajectoryEvents(),
     // which listens for TaskCompleted/TaskFailed on the event router.
     // No per-task polling needed.
+
+    // Trajectory judge: opt-in LLM scoring of recent unscored trajectories.
+    // Hook-created rows in qe_trajectories never receive feedback unless
+    // something goes back and judges them. This catches up by scoring ≤5
+    // rows per task_orchestrate call. Opt-in (AQE_TRAJECTORY_JUDGE=1)
+    // because it makes paid LLM calls.
+    if (process.env.AQE_TRAJECTORY_JUDGE === '1' && process.env.ANTHROPIC_API_KEY) {
+      void scoreUnjudgedTrajectories().catch(err => {
+        console.warn('[TrajectoryJudge] failed:', err instanceof Error ? err.message : err);
+      });
+    }
 
     return {
       success: true,
