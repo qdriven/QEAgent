@@ -30,7 +30,7 @@ import {
   type TaskOutcome,
 } from '../services/reasoning-bank-service';
 import type { ModelTier } from '../../integrations/agentic-flow';
-import type { QEDomain } from '../../learning/qe-patterns.js';
+import type { QEDomain, QEPattern } from '../../learning/qe-patterns.js';
 import { toErrorMessage } from '../../shared/error-utils.js';
 
 // ============================================================================
@@ -336,6 +336,17 @@ export async function handleTaskOrchestrate(
       params.context?.project as QEDomain | undefined
     );
 
+    // Bring HNSW A (qe_patterns) into the routing decision alongside HNSW C
+    // (experienceGuidance). Without this, only past trajectories influenced
+    // routing — the catalog of consolidated long-term patterns was never
+    // consulted for new tasks. Fail-soft: empty array on error.
+    const patternHintMatches = await reasoningBankService
+      .searchPatterns(params.task, {
+        limit: 5,
+        domain: (params.context?.project as QEDomain | undefined) ?? (inferredDomain as QEDomain | undefined),
+      })
+      .catch(() => [] as QEPattern[]);
+
     // Parse task description to determine task type
     const taskType = inferTaskType(params.task);
     const priority = mapPriority(params.priority || 'medium');
@@ -448,6 +459,17 @@ export async function handleTaskOrchestrate(
           confidence: experienceGuidance.confidence,
           tokenSavings: experienceGuidance.estimatedTokenSavings,
         } : undefined,
+        // HNSW A pattern hints for the executing agent
+        patternHints: patternHintMatches.length > 0
+          ? patternHintMatches.map(p => ({
+              patternId: p.id,
+              name: p.name,
+              description: p.description,
+              confidence: p.confidence,
+              similarity: p.qualityScore,
+              canReuse: p.tier === 'long-term',
+            }))
+          : undefined,
       },
       timeout: 600000, // 10 minutes for orchestrated tasks
     });
