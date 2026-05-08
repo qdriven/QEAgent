@@ -88,12 +88,53 @@ function openOrCreateRvf(
   rvfPath: string,
   dimensions: number,
 ): RvfNativeAdapter {
+  const tryOpen = (): { adapter: RvfNativeAdapter; err: null } | { adapter: null; err: unknown } => {
+    try {
+      return { adapter: openFn(rvfPath), err: null };
+    } catch (err) {
+      return { adapter: null, err };
+    }
+  };
+  const isLockHeld = (err: unknown): boolean => {
+    const m = err instanceof Error ? err.message : String(err);
+    return m.includes('LockHeld') || m.includes('0x0300');
+  };
+
   // Pass 1: try to open whatever's there.
-  let opened: RvfNativeAdapter | null = null;
-  try {
-    opened = openFn(rvfPath);
-  } catch {
-    opened = null;
+  let { adapter: opened, err: openErr } = tryOpen();
+
+  // Pass 1.5: stale-lock recovery. The native binding writes a `<rvfPath>.lock`
+  // file on open and removes it on close. `aqe init` and short-lived CLI
+  // processes routinely exit without an explicit close, leaving a stale
+  // .lock that subsequent invocations interpret as `LockHeld`. Since AQE
+  // CLI is overwhelmingly single-shot serial, the realistic case is "the
+  // prior process is dead and the lock is stale". We unlink the .lock and
+  // retry open exactly once. If a genuinely-live peer existed, it still
+  // holds the file open — but the binding's lock is content-based (lock
+  // file presence), so this is a best-effort cooperative recovery rather
+  // than an OS-level lock break.
+  if (!opened && isLockHeld(openErr)) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs = require('fs');
+      const lockPath = `${rvfPath}.lock`;
+      if (fs.existsSync(lockPath)) {
+        fs.unlinkSync(lockPath);
+        console.warn(
+          `[RVF] Removed stale lock file at ${lockPath} (prior process exited without closing). ` +
+            'Retrying open. If you see this repeatedly under live concurrency, file an issue.',
+        );
+        ({ adapter: opened, err: openErr } = tryOpen());
+      }
+    } catch (recoveryErr) {
+      // Lock removal failed (permissions?) — fall through to error path.
+      if (process.env.DEBUG) {
+        console.debug(
+          '[RVF] stale-lock recovery failed:',
+          recoveryErr instanceof Error ? recoveryErr.message : recoveryErr,
+        );
+      }
+    }
   }
 
   if (opened) {
@@ -111,7 +152,7 @@ function openOrCreateRvf(
     );
   }
 
-  // Pass 2: open failed → try create.
+  // Pass 2: open failed even after stale-lock recovery → try create.
   try {
     return createFn(rvfPath, dimensions);
   } catch (createErr) {

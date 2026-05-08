@@ -5,6 +5,30 @@ All notable changes to the Agentic QE project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.21] - 2026-05-08
+
+**Three independent fixes** that unblock real-world usage: Windows installs no longer
+fail when Visual Studio C++ Build Tools aren't installed; the RVF pattern store now
+actually initializes (`FsyncFailed 0x0303` is fixed at the root cause, not patched
+around with a fallback); and the hypergraph queries `findUntestedFunctions` /
+`findImpactedTests` finally return useful results instead of empty answers.
+
+### Fixed
+
+- **Windows installs failed mid-`npm install` when VS Build Tools were absent** (#439) — `hnswlib-node@^3.0.0` ships no prebuilt binaries and runs `node-gyp rebuild` on every install; without the C++ toolchain installed the whole `agentic-qe` install crashed. Moved to `optionalDependencies` so npm tolerates the compile failure and continues; `HnswAdapter` already routes around a missing native binary at runtime via the pure-JS `ProgressiveHnswBackend`. Replaced the top-level static `import hnswlib from 'hnswlib-node'` in `src/integrations/embeddings/index/HNSWIndex.ts` with a lazy require so the package itself loads even when the native module is absent. README and the preinstall script document the toolchain requirement and disclose the brute-force degradation mode honestly.
+- **RVF pattern store crashed every time the .rvf file already existed** (Jordi RUFLO P020) — `getSharedRvfAdapter` and the `pattern-store` factory always called `RvfDatabase.create()`, which throws `RVF error 0x0303: FsyncFailed` when the target file exists. Earlier init phases legitimately produce `patterns.rvf`, so every subsequent CLI / MCP boot crashed RVF init and silently fell back to SQLite (`hnswStats.nativeAvailable: false`). Reproduced and confirmed against both `@ruvector/rvf-node@0.1.7` and `0.1.8` — not a version regression. Replaced with a race-tolerant open-or-create ladder (try open → fall back to create → retry open on create-race) plus `dim()` verification after open so a dimension-mismatched file is detected and the caller degrades rather than corrupting silently.
+- **`findUntestedFunctions` and `findImpactedTests` always returned empty** (Jordi RUFLO P220 follow-up) — both queries filter on `type='test'` source nodes joined to `type='covers'` edges, but `buildFromIndexResult` only ever wrote `type='file'` nodes and `imports` / `contains` edges. Added `HypergraphEngine.synthesizeTestCoverage()`, called from the coordinator after `buildFromIndexResult` succeeds, that re-tags test-shaped file nodes (`*.test.ts`, `*.spec.ts`, `_test.go`, etc.) as `type='test'` and writes `covers` edges from each test file to the function entities in the source files it imports. End-to-end verified on a fresh project: `aqe hg untested` correctly excludes covered functions; `aqe hg impacted src/calc.ts` returns the right test file.
+
+### Added
+
+- **Windows install advisory** in `scripts/preinstall.cjs` — fires only on `win32`, lists the toolchain options (Python 3 + VS 2022 Build Tools, or VS 2026 + npm ≥ 11.6.3), and explains that the JS HNSW fallback degrades to O(N) brute-force when `@ruvector/gnn` is also unavailable (the default on Windows since no win32 prebuilds ship). Suppress with `AQE_SKIP_WINDOWS_NOTICE=true`.
+
+### Upgrade Notes
+
+- No breaking changes. `engines.node` stays at `>=18.0.0` and `engines.npm` at `>=8.0.0` (no Node 18 LTS users will hit `EBADENGINE`).
+- `@ruvector/rvf-node` stays pinned at `^0.1.7`. The version pin is unrelated to the FsyncFailed fix — that bug was in our caller.
+- Existing installs with a working RVF file see no behavioural change. Installs that previously fell back silently to SQLite will now use RVF — surfacing any latent RVF bugs (lock contention, recall divergence) that were previously hidden. If you observe RVF-specific issues post-upgrade, file an issue; an `AQE_DISABLE_RVF` escape hatch is on the follow-up list.
+
 ## [3.9.20] - 2026-05-08
 
 **Second wave of self-learning wire-gap fixes** built on 3.9.19. HNSW A (the long-term pattern catalog) is now consulted on every `task_orchestrate` call, hook-side experience writes get embeddings inline instead of waiting for the next-boot backfill, dream cycles inherit the same patient SQLite timeout the rest of the system uses, pattern `quality_score` actually moves when patterns are reused through the hook flow, and the legacy `TrajectoryBridge` no longer maintains its own `.agentic-qe/trajectories.db` outside the unified-memory rule.
