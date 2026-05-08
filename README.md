@@ -50,6 +50,45 @@ After init, your coding agent can use AQE tools directly. For example in Claude 
 "Analyze why tests in auth/ are flaky and suggest fixes"
 ```
 
+### Windows install
+
+`agentic-qe` runs on Windows, but several of its performance-oriented native
+dependencies (`hnswlib-node` for HNSW search, `@ruvector/gnn` for graph
+neural networks, `@ruvector/rvf-node` for the RVF pattern store) ship as
+optional native modules. `hnswlib-node` in particular has no prebuilt
+binaries and compiles from source via `node-gyp`. `npm install` does not
+fail when these modules can't build — they're declared optional and AQE
+falls back to JavaScript paths at runtime.
+
+**Important caveat about the fallback.** The pure-JavaScript HNSW fallback
+(`ProgressiveHnswBackend`) is correct but degrades to O(N) brute-force search
+when neither `hnswlib-node` nor `@ruvector/gnn` is available. That's fine for
+small projects but **unsuitable for large indexes** (tens of thousands of
+vectors and up). If you plan to run AQE against a sizeable codebase on
+Windows, install the native build toolchain so `hnswlib-node` compiles:
+
+- **Python 3** (added to `PATH`), and
+- **Visual Studio 2022 Build Tools** with the *Desktop development with C++*
+  workload — works with any node-gyp version, **or**
+- **Visual Studio 2026** with the same workload **plus** an upgraded npm
+  (`npm install -g npm@latest` — VS 2026 detection requires npm ≥ 11.6.3,
+  shipped via node-gyp ≥ 12.1.0). Node 22 LTS still ships npm 10.x by
+  default, which cannot detect VS 2026; either upgrade npm globally or use
+  VS 2022 Build Tools instead.
+
+If the native dep fails to build you'll see a `node-gyp` warning during
+install (e.g. `gyp ERR! find VS`); the install itself completes. To verify
+which backend is active:
+
+```bash
+aqe health
+# Look for "HNSW backend: native" (hnswlib-node) or "HNSW backend: js"
+# (ProgressiveHnswBackend — see caveat above).
+```
+
+Linux and macOS users: no extra setup required. The native binary compiles
+out of the box.
+
 ---
 
 ## Claude Code Plugin (Alternative Install)

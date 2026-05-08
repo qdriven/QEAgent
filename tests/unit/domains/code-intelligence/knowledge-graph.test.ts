@@ -463,4 +463,5 @@ describe('KnowledgeGraphService', () => {
       expect(defaultService).toBeDefined();
     });
   });
+
 });

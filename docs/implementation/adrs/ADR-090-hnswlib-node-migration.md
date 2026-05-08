@@ -212,9 +212,36 @@ No data migration is required. The unified `memory.db` is the source of truth an
 
 ---
 
+## Amendment 2026-05-08 — Move `hnswlib-node` to `optionalDependencies` (issue #439)
+
+Issue [#439](https://github.com/proffesor-for-testing/agentic-qe/issues/439) reported that fresh Windows installs of `agentic-qe` fail because `hnswlib-node@^3.0.0` ships no prebuilds and runs `node-gyp rebuild` on every install, which requires Visual Studio C++ Build Tools — and on VS 2026 also requires `npm >= 11.6.3` (above this project's declared `engines.npm: >=8.0.0` floor).
+
+The original ADR-081 design (which ADR-090 supersedes only in the choice of native engine, not the fallback architecture) explicitly mandated that the native HNSW backend be **an optional dependency** with a **pure-JavaScript fallback** for environments where the native binary is unavailable. The current placement of `hnswlib-node` in `dependencies` rather than `optionalDependencies` is therefore a regression from ADR-081's stated architectural intent — not a deliberate decision of this ADR.
+
+**Clarification:** the ADR-090 sentence *"no new dependency addition (`hnswlib-node` was already in `package.json`)"* is a factual statement about the migration scope; it does **not** bind the dependency to the `dependencies` block.
+
+**Action taken:**
+
+1. `hnswlib-node@^3.0.0` moved from `dependencies` to `optionalDependencies` in `package.json`. npm tolerates compile failure for optional deps and continues the install; the runtime `HnswAdapter.createBackend()` already catches `NativeHnswUnavailableError` and falls back to `ProgressiveHnswBackend` (pure-JS), preserving correctness on platforms where the native binary cannot be built.
+2. `src/integrations/embeddings/index/HNSWIndex.ts` switched from a static top-level `import hnswlib from 'hnswlib-node'` to a lazy require inside the legacy fallback path, so package load no longer fails when the optional binary is missing. This branch is dead code under ADR-071 Phase 2C anyway (production always takes the unified-adapter path).
+3. README gains a Windows install section documenting the toolchain requirement and the optional nature of the native backend.
+4. `engines.npm` raised from `>=8.0.0` to `>=10.0.0` (a soft floor; the strict `>=11.6.3` requirement only applies to Windows + VS 2026 users and is documented in the README).
+5. `scripts/preinstall.cjs` gains a Windows toolchain advisory message.
+
+**Invariants preserved:**
+
+- `useNativeHNSW: true` remains the default. On Linux/macOS (and Windows with VS Build Tools), the optional dep installs and the native backend is selected as before.
+- The bug-fix scope of ADR-090 (issue #399 four-bug remediation via hnswlib-node) is unchanged. This amendment does not alter the search engine, the metric handling, the persistence behavior, or the metrics surface.
+- ADR-081's "two code paths during transition" model is now accurately reflected in `package.json`.
+
+No supersession; this is an amendment within ADR-090's accepted scope.
+
+---
+
 ## References
 
 - Issue: [#399](https://github.com/proffesor-for-testing/agentic-qe/issues/399)
+- Issue (amendment): [#439](https://github.com/proffesor-for-testing/agentic-qe/issues/439)
 - Superseded part of: ADR-081 (Native HNSW via @ruvector/router NAPI)
 - Related: ADR-071 (HNSW Implementation Unification)
 - Diagnostic scripts: `scripts/diagnose-issue-399.mjs`, `-realistic.mjs`, `-direct.mjs`, `-hnswlib.mjs`

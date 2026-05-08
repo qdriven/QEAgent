@@ -580,6 +580,32 @@ export class CodeIntelligenceCoordinator
             if (codeIndexResult.files.length > 0) {
               await this.hypergraph.buildFromIndexResult(codeIndexResult);
               logger.info(`Hypergraph rebuilt from ${codeIndexResult.files.length} indexed files`);
+
+              // Synthesize test-coverage shape so findUntestedFunctions /
+              // findImpactedTests have data to read. buildFromIndexResult
+              // only writes file/entity nodes, `contains` edges (Phase 2),
+              // and `imports` edges (Phase 3) — none of which match the
+              // `type='test'` + `type='covers'` filters those queries
+              // require. The synthesizer re-tags test-shaped file nodes
+              // and writes covers edges from each test file to the
+              // functions in the source files it imports. (Issue #439 /
+              // Jordi P220 follow-up.)
+              try {
+                const synth = await this.hypergraph.synthesizeTestCoverage();
+                if (synth.testsTagged > 0 || synth.coversCreated > 0) {
+                  logger.info(
+                    `Test coverage synthesized: tests_tagged=${synth.testsTagged} covers_created=${synth.coversCreated}`,
+                  );
+                }
+              } catch (synthError) {
+                // Non-fatal — hypergraph nodes/edges from buildFromIndexResult
+                // remain useful for module-dependency queries.
+                logger.warn(
+                  `Test coverage synthesis skipped: ${
+                    synthError instanceof Error ? synthError.message : synthError
+                  }`,
+                );
+              }
             }
           } catch (hgError) {
             // Non-fatal: hypergraph is supplementary to the core indexing pipeline

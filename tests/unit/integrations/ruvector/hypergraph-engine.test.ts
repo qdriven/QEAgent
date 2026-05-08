@@ -820,4 +820,180 @@ describe('HypergraphEngine', () => {
       freshDb.close();
     });
   });
+
+  // ----------------------------------------------------------------------
+  // synthesizeTestCoverage — issue #439 / Jordi P220 follow-up
+  // ----------------------------------------------------------------------
+  describe('synthesizeTestCoverage', () => {
+    /**
+     * Seed the hypergraph state that buildFromIndexResult would have
+     * produced: file nodes (`type='file'`), function entity nodes
+     * (`type='function'`), `imports` edges between files, `contains`
+     * edges from files to their functions. The synthesizer should then
+     * re-tag test files and write `covers` edges.
+     */
+    function seedFromIndex(params: {
+      files: Array<{ path: string }>;
+      functions: Array<{ file: string; name: string }>;
+      imports: Array<{ from: string; to: string }>;
+    }): void {
+      const insN = db.prepare(
+        `INSERT OR REPLACE INTO hypergraph_nodes (id, type, name, file_path) VALUES (?, ?, ?, ?)`,
+      );
+      const insE = db.prepare(
+        `INSERT OR REPLACE INTO hypergraph_edges (id, source_id, target_id, type, weight) VALUES (?, ?, ?, ?, 1.0)`,
+      );
+      for (const f of params.files) {
+        insN.run(`file:${f.path}`, 'file', f.path.split('/').pop() ?? f.path, f.path);
+      }
+      for (const fn of params.functions) {
+        const id = `function:${fn.file}:${fn.name}`;
+        insN.run(id, 'function', fn.name, fn.file);
+        const containsId = `file:${fn.file}--contains-->${id}`;
+        insE.run(containsId, `file:${fn.file}`, id, 'contains');
+      }
+      for (const imp of params.imports) {
+        const eId = `file:${imp.from}--imports-->file:${imp.to}`;
+        insE.run(eId, `file:${imp.from}`, `file:${imp.to}`, 'imports');
+      }
+    }
+
+    it('re-tags test files as type=test and writes covers edges to imported source functions', async () => {
+      seedFromIndex({
+        files: [
+          { path: '/proj/src/foo.ts' },
+          { path: '/proj/src/bar.ts' },
+          { path: '/proj/tests/foo.test.ts' },
+        ],
+        functions: [
+          { file: '/proj/src/foo.ts', name: 'doFoo' },
+          { file: '/proj/src/foo.ts', name: 'helpFoo' },
+          { file: '/proj/src/bar.ts', name: 'doBar' },
+        ],
+        imports: [{ from: '/proj/tests/foo.test.ts', to: '/proj/src/foo.ts' }],
+      });
+
+      const result = await engine.synthesizeTestCoverage();
+
+      expect(result.testsTagged).toBe(1);
+      expect(result.coversCreated).toBe(2); // doFoo + helpFoo
+
+      // Test file is now type='test'
+      const testNode = db
+        .prepare(`SELECT type FROM hypergraph_nodes WHERE id = 'file:/proj/tests/foo.test.ts'`)
+        .get() as { type: string };
+      expect(testNode.type).toBe('test');
+
+      // covers edges exist for both functions in foo.ts
+      const covers = db
+        .prepare(`SELECT target_id FROM hypergraph_edges WHERE source_id = 'file:/proj/tests/foo.test.ts' AND type = 'covers' ORDER BY target_id`)
+        .all() as Array<{ target_id: string }>;
+      expect(covers.map((r) => r.target_id)).toEqual([
+        'function:/proj/src/foo.ts:doFoo',
+        'function:/proj/src/foo.ts:helpFoo',
+      ]);
+
+      // doBar is NOT covered — bar.ts isn't imported by the test
+      const barCovers = db
+        .prepare(`SELECT 1 FROM hypergraph_edges WHERE target_id = 'function:/proj/src/bar.ts:doBar' AND type = 'covers'`)
+        .get();
+      expect(barCovers).toBeUndefined();
+    });
+
+    it('makes findUntestedFunctions return only the genuinely-uncovered functions', async () => {
+      seedFromIndex({
+        files: [
+          { path: '/p/src/a.ts' },
+          { path: '/p/src/b.ts' },
+          { path: '/p/tests/a.spec.ts' },
+        ],
+        functions: [
+          { file: '/p/src/a.ts', name: 'covered' },
+          { file: '/p/src/b.ts', name: 'orphan' },
+        ],
+        imports: [{ from: '/p/tests/a.spec.ts', to: '/p/src/a.ts' }],
+      });
+
+      // Before synthesis: both functions appear untested.
+      const before = await engine.findUntestedFunctions();
+      expect(before.map((n) => n.name).sort()).toEqual(['covered', 'orphan']);
+
+      await engine.synthesizeTestCoverage();
+
+      const after = await engine.findUntestedFunctions();
+      expect(after.map((n) => n.name)).toEqual(['orphan']);
+    });
+
+    it('findImpactedTests returns the test for an imported source change', async () => {
+      seedFromIndex({
+        files: [
+          { path: '/p/src/svc.ts' },
+          { path: '/p/tests/svc.test.ts' },
+          { path: '/p/tests/unrelated.test.ts' },
+        ],
+        functions: [{ file: '/p/src/svc.ts', name: 'run' }],
+        imports: [{ from: '/p/tests/svc.test.ts', to: '/p/src/svc.ts' }],
+      });
+
+      await engine.synthesizeTestCoverage();
+
+      const impacted = await engine.findImpactedTests(['/p/src/svc.ts']);
+      expect(impacted.map((n) => n.id)).toEqual(['file:/p/tests/svc.test.ts']);
+    });
+
+    it('is idempotent — repeated synthesis converges (covers edges replaced not duplicated)', async () => {
+      seedFromIndex({
+        files: [{ path: '/p/src/x.ts' }, { path: '/p/x.test.ts' }],
+        functions: [{ file: '/p/src/x.ts', name: 'fn' }],
+        imports: [{ from: '/p/x.test.ts', to: '/p/src/x.ts' }],
+      });
+
+      const r1 = await engine.synthesizeTestCoverage();
+      const r2 = await engine.synthesizeTestCoverage();
+
+      // First run tags + creates; second run finds nothing new to tag, but
+      // re-emits the covers edge with INSERT OR REPLACE (idempotent on row count).
+      expect(r1.testsTagged).toBe(1);
+      expect(r2.testsTagged).toBe(0);
+
+      const count = db
+        .prepare(`SELECT COUNT(*) AS c FROM hypergraph_edges WHERE type = 'covers'`)
+        .get() as { c: number };
+      expect(count.c).toBe(1);
+    });
+
+    it('matches the configured test-file patterns and ignores non-test files', async () => {
+      seedFromIndex({
+        files: [
+          { path: '/p/src/foo.ts' }, // production
+          { path: '/p/foo.test.ts' }, // matches default pattern
+          { path: '/p/foo_test.go' }, // matches default pattern
+          { path: '/p/src/notatest.ts' }, // does not match
+        ],
+        functions: [{ file: '/p/src/foo.ts', name: 'doFoo' }],
+        imports: [
+          { from: '/p/foo.test.ts', to: '/p/src/foo.ts' },
+          { from: '/p/foo_test.go', to: '/p/src/foo.ts' },
+          { from: '/p/src/notatest.ts', to: '/p/src/foo.ts' },
+        ],
+      });
+
+      const result = await engine.synthesizeTestCoverage();
+      expect(result.testsTagged).toBe(2);
+
+      // notatest.ts stays type='file' and should not produce a covers edge.
+      const stillFile = db
+        .prepare(`SELECT type FROM hypergraph_nodes WHERE id = 'file:/p/src/notatest.ts'`)
+        .get() as { type: string };
+      expect(stillFile.type).toBe('file');
+
+      const covers = db
+        .prepare(`SELECT DISTINCT source_id FROM hypergraph_edges WHERE type = 'covers' ORDER BY source_id`)
+        .all() as Array<{ source_id: string }>;
+      expect(covers.map((r) => r.source_id)).toEqual([
+        'file:/p/foo.test.ts',
+        'file:/p/foo_test.go',
+      ]);
+    });
+  });
 });

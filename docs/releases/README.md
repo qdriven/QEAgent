@@ -4,6 +4,7 @@ All Agentic QE release notes organized by version.
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| [v3.9.21](v3.9.21.md) | 2026-05-08 | Windows install unblocked (#439), RVF FsyncFailed root-cause fix, hypergraph `untested` / `impacted` queries return useful results |
 | [v3.9.20](v3.9.20.md) | 2026-05-08 | Second wave wire-gap fixes: HNSW A in routing, hook-side embeddings inline, dream cycle busy_timeout, pattern quality_score moves on hook flow, TrajectoryBridge → unified memory |
 | [v3.9.19](v3.9.19.md) | 2026-05-05 | Self-learning loop wire-gap fixes: workers tick, HNSW loads on boot, hook outputs persist, multi-dim quality |
 | [v3.9.18](v3.9.18.md) | 2026-04-30 | Four MCP fixes (governance throttle, jest output, temp-path leak, coverage error msg) + `agentic-qe-fleet` plugin |

@@ -1141,7 +1141,135 @@ export class HypergraphEngine {
     };
     return mapping[entityType] ?? 'function';
   }
+
+  /**
+   * Synthesize test-coverage edges from existing index state.
+   *
+   * Closes the gap that left `findUntestedFunctions`/`findImpactedTests`
+   * blind on every project (issue #439 / Jordi P220 follow-up). The shape
+   * of the gap was: those queries filter on `type='test'` source nodes and
+   * `type='covers'` edges, but `buildFromIndexResult` only ever wrote
+   * `type='file'` nodes and `imports`/`contains` edges. Result: empty
+   * answers regardless of indexing activity.
+   *
+   * This synthesis runs as a post-step over what `buildFromIndexResult`
+   * already produced:
+   *
+   *   1. **Tag test files.** Re-type any file node whose path matches a
+   *      test naming pattern (`.test.ts`, `.spec.ts`, `_test.py`, …) from
+   *      `'file'` to `'test'`. Idempotent — re-tagging a node already
+   *      typed `'test'` is a no-op. Existing-file UPDATEs in Phase 1 of
+   *      `buildFromIndexResult` only touch `nodesUpdated++` counter (no
+   *      column UPDATE), so the `'test'` tag survives subsequent indexes.
+   *
+   *   2. **Synthesize `covers` edges.** For each test file, walk its
+   *      `imports` edges to find imported source files; for each source
+   *      file, walk its `contains` edges to find function entities; write
+   *      `INSERT OR REPLACE` `covers` edges from the test file to each
+   *      such function. This is a heuristic — Jest/Vitest projects
+   *      typically `import { Foo } from '../src/foo'` and exercise `Foo`'s
+   *      methods in `it(...)` blocks; we treat that import structure as
+   *      proxy evidence of coverage. A proper coverage harness (Istanbul/
+   *      c8 lcov ingest) would produce sharper edges, but those would
+   *      slot in via the same `covers` schema.
+   *
+   * Idempotent: repeated calls converge — `INSERT OR REPLACE` on the same
+   * edge id (`${testId}--covers-->${fnId}`) is a no-op for unchanged
+   * topology.
+   *
+   * @returns Counts: `testsTagged` (file→test re-types this call) and
+   *          `coversCreated` (covers-edge writes this call, including
+   *          replacements of existing rows).
+   */
+  async synthesizeTestCoverage(opts?: {
+    testPathPatterns?: RegExp[];
+  }): Promise<{ testsTagged: number; coversCreated: number }> {
+    this.ensureInitialized();
+
+    const patterns = opts?.testPathPatterns ?? DEFAULT_TEST_PATH_PATTERNS;
+
+    let testsTagged = 0;
+    let coversCreated = 0;
+
+    const fileRows = this.config.db
+      .prepare(
+        `SELECT id, file_path FROM hypergraph_nodes
+         WHERE type IN ('file', 'test') AND file_path IS NOT NULL`,
+      )
+      .all() as Array<{ id: string; file_path: string }>;
+
+    const testFileIds: string[] = [];
+    for (const row of fileRows) {
+      if (patterns.some((p) => p.test(row.file_path))) {
+        testFileIds.push(row.id);
+      }
+    }
+
+    if (testFileIds.length === 0) {
+      return { testsTagged: 0, coversCreated: 0 };
+    }
+
+    const tagStmt = this.config.db.prepare(
+      `UPDATE hypergraph_nodes SET type = 'test', updated_at = datetime('now')
+       WHERE id = ? AND type = 'file'`,
+    );
+    const findImportsStmt = this.config.db.prepare(
+      `SELECT target_id FROM hypergraph_edges
+       WHERE source_id = ? AND type = 'imports'`,
+    );
+    const findFunctionsStmt = this.config.db.prepare(
+      `SELECT n.id AS id FROM hypergraph_nodes n
+       JOIN hypergraph_edges e ON e.target_id = n.id
+       WHERE e.source_id = ? AND e.type = 'contains' AND n.type = 'function'`,
+    );
+    const insertCoversStmt = this.config.db.prepare(`
+      INSERT OR REPLACE INTO hypergraph_edges (id, source_id, target_id, type, weight)
+      VALUES (?, ?, ?, 'covers', 1.0)
+    `);
+
+    const txn = this.config.db.transaction(() => {
+      for (const testId of testFileIds) {
+        // (1) Re-tag — only counts the first transition file→test.
+        const taggedRows = tagStmt.run(testId).changes;
+        if (taggedRows > 0) testsTagged++;
+
+        // (2) Walk imports → contains → write covers.
+        const importedFileIds = (
+          findImportsStmt.all(testId) as Array<{ target_id: string }>
+        ).map((r) => r.target_id);
+
+        for (const fileId of importedFileIds) {
+          const functionIds = (
+            findFunctionsStmt.all(fileId) as Array<{ id: string }>
+          ).map((r) => r.id);
+
+          for (const fnId of functionIds) {
+            const edgeId = `${testId}--covers-->${fnId}`;
+            insertCoversStmt.run(edgeId, testId, fnId);
+            coversCreated++;
+          }
+        }
+      }
+    });
+    txn();
+
+    return { testsTagged, coversCreated };
+  }
 }
+
+/**
+ * Test-file path patterns matched by {@link HypergraphEngine.synthesizeTestCoverage}.
+ * Mirrors `KnowledgeGraphService.isTestFile` so the two layers agree on what
+ * "looks like a test file" means.
+ */
+const DEFAULT_TEST_PATH_PATTERNS: readonly RegExp[] = [
+  /\.test\.[tj]sx?$/,
+  /\.spec\.[tj]sx?$/,
+  /_test\.[tj]sx?$/,
+  /test_.*\.py$/,
+  /.*_test\.py$/,
+  /.*_test\.go$/,
+];
 
 // ============================================================================
 // Factory Functions

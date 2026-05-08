@@ -116,11 +116,65 @@ function removeStaleSymlink(binaryPath) {
   return false;
 }
 
+function emitWindowsToolchainNotice() {
+  // Only show on Windows. Optional native dep `hnswlib-node` compiles from
+  // source via node-gyp and needs a C++ toolchain to install. If it fails
+  // the install still succeeds (it's optional) — this notice just tells the
+  // user what to install if they want the faster native HNSW backend.
+  // See README "Windows install" section and ADR-090 amendment 2026-05-08.
+  if (process.platform !== 'win32') return;
+  if (process.env.AQE_SKIP_WINDOWS_NOTICE === 'true') return;
+
+  console.log('');
+  log(`${BOLD}Windows install notice${RESET}`);
+  console.log(
+    `  agentic-qe will attempt to compile the optional native HNSW backend`
+  );
+  console.log(`  (hnswlib-node) during install. This requires:`);
+  console.log('');
+  console.log(`    - ${BOLD}Python 3${RESET} on PATH, and`);
+  console.log(
+    `    - ${BOLD}Visual Studio 2022 Build Tools${RESET} with the` +
+      ` 'Desktop development with C++' workload, OR`
+  );
+  console.log(
+    `    - ${BOLD}Visual Studio 2026${RESET} with the same workload AND` +
+      ` ${BOLD}npm >= 11.6.3${RESET}`
+  );
+  console.log(`      (run: ${CYAN}npm install -g npm@latest${RESET})`);
+  console.log('');
+  console.log(
+    `  ${YELLOW}If the native build fails, install still succeeds${RESET} —`
+  );
+  console.log(
+    `  AQE falls back to a pure-JS HNSW backend at runtime. That fallback`
+  );
+  console.log(
+    `  is correct but degrades to O(N) brute-force when @ruvector/gnn is`
+  );
+  console.log(
+    `  also unavailable (the default on Windows — no win32 prebuilds`
+  );
+  console.log(
+    `  ship). Fine for small projects; for codebases with tens of`
+  );
+  console.log(
+    `  thousands of vectors or more, install the toolchain.`
+  );
+  console.log('');
+  console.log(
+    `  Set ${CYAN}AQE_SKIP_WINDOWS_NOTICE=true${RESET} to suppress this notice.`
+  );
+  console.log('');
+}
+
 function main() {
   // Skip in CI environments unless explicitly requested
   if (process.env.CI && !process.env.AQE_PREINSTALL_CHECK) {
     return;
   }
+
+  emitWindowsToolchainNotice();
 
   const aqeBinary = findExistingAqeBinary();
 

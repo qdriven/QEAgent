@@ -1874,8 +1874,37 @@ export function createPatternStore(
         }
 
         if (!useSharedAdapter) {
+          // Race-tolerant open-or-create with dim verification, mirroring
+          // shared-rvf-adapter.ts. Bare `existsSync ? open : create` is
+          // racy across processes (two parallel CLI invocations during init
+          // both observe absent, second hits FsyncFailed regardless). Try
+          // open first, fall back to create, retry open on create-race.
+          // (Jordi #439 / RUFLO P020.)
           const store = new RvfPatternStore(
-            (path: string, dim: number) => _createRvfStore(path, dim),
+            (path: string, dim: number) => {
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { openRvfStore } = require('../integrations/ruvector/rvf-native-adapter.js');
+              const tryOpen = () => {
+                try { return openRvfStore(path); } catch { return null; }
+              };
+              let adapter = tryOpen();
+              if (adapter) {
+                if (adapter.dimension() !== dim) {
+                  try { adapter.close(); } catch { /* best-effort */ }
+                  throw new Error(
+                    `RVF dimension mismatch (file=${adapter.dimension()}, requested=${dim})`,
+                  );
+                }
+                return adapter;
+              }
+              try {
+                return _createRvfStore(path, dim);
+              } catch (createErr) {
+                adapter = tryOpen();
+                if (adapter && adapter.dimension() === dim) return adapter;
+                throw createErr;
+              }
+            },
             { rvfPath, base: mergedConfig },
           );
           console.log('[PatternStore] Using RVF-backed store (ADR-066)');
