@@ -17,10 +17,32 @@ import type {
   ISearchOptions,
 } from '../base/types.js';
 
-// ESM/CJS interop: hnswlib-node is CommonJS, we import via default export
-// This pattern matches real-qe-reasoning-bank.ts for consistency
-import hnswlib from 'hnswlib-node';
-const { HierarchicalNSW } = hnswlib as { HierarchicalNSW: typeof import('hnswlib-node').HierarchicalNSW };
+// hnswlib-node is an OPTIONAL dependency (issue #439, ADR-090 amendment).
+// Top-level static import would crash module load on platforms where the
+// native binary failed to compile (e.g. Windows without VS Build Tools).
+// We use a type-only import for type information (erased at runtime) and
+// a lazy require for the actual constructor so the legacy code path below
+// can still execute when the binary IS present, but the package as a whole
+// loads fine when it is not. Type-only imports do not emit `require()`
+// calls in compiled JS, so this is safe even when hnswlib-node is absent.
+//
+// ADR-071 Phase 2C: production always takes the unified HnswAdapter path
+// (see initializeIndex below). This legacy hnswlib-node branch is retained
+// purely as an emergency rollback path and should rarely, if ever, run.
+type HierarchicalNSWClass = typeof import('hnswlib-node').HierarchicalNSW;
+type HierarchicalNSWInstance = InstanceType<HierarchicalNSWClass>;
+
+let cachedHnswlibCtor: HierarchicalNSWClass | null = null;
+function loadHnswlibConstructor(): HierarchicalNSWClass {
+  if (cachedHnswlibCtor) return cachedHnswlibCtor;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const mod = require('hnswlib-node') as { HierarchicalNSW?: HierarchicalNSWClass };
+  if (!mod.HierarchicalNSW) {
+    throw new Error('hnswlib-node module missing HierarchicalNSW export');
+  }
+  cachedHnswlibCtor = mod.HierarchicalNSW;
+  return cachedHnswlibCtor;
+}
 
 // ADR-071 Phase 2C: Always use unified HnswAdapter backend.
 // The hnswlib-node legacy path below is retained as dead code for
@@ -36,7 +58,7 @@ function isUnifiedHnswActive(): boolean {
  * 150x-12,500x faster than linear search for large embedding collections.
  */
 export class HNSWEmbeddingIndex {
-  private indexes: Map<EmbeddingNamespace, InstanceType<typeof HierarchicalNSW>>;
+  private indexes: Map<EmbeddingNamespace, HierarchicalNSWInstance>;
   private config: IHNSWConfig;
   private initialized: Set<EmbeddingNamespace>;
   private nextId: Map<EmbeddingNamespace, number>;
@@ -102,7 +124,8 @@ export class HNSWEmbeddingIndex {
 
     const space = spaceMap[this.config.metric] || 'cosine';
 
-    const index = new HierarchicalNSW(space, this.config.dimension);
+    const HierarchicalNSWCtor = loadHnswlibConstructor();
+    const index = new HierarchicalNSWCtor(space, this.config.dimension);
 
     index.initIndex({
       maxElements: 10000,
@@ -274,7 +297,8 @@ export class HNSWEmbeddingIndex {
     };
 
     const space = spaceMap[this.config.metric] || 'cosine';
-    const index = new HierarchicalNSW(space, this.config.dimension);
+    const HierarchicalNSWCtor = loadHnswlibConstructor();
+    const index = new HierarchicalNSWCtor(space, this.config.dimension);
 
     await index.readIndex(path);
 
