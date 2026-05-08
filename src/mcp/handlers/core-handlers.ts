@@ -594,8 +594,8 @@ export async function handleAQEHealth(): Promise<ToolResult<{
         const hnswEnabled = process.env.AQE_V3_HNSW_ENABLED === 'true';
         hnswStats.enabled = hnswEnabled;
         const memAny = mem as unknown as Record<string, unknown>;
-        if (hnswEnabled && typeof memAny.getVectorCount === 'function') {
-          hnswStats.vectorCount = await (memAny.getVectorCount as () => Promise<number>)();
+        if (hnswEnabled && typeof memAny.vectorCount === 'function') {
+          hnswStats.vectorCount = await (memAny.vectorCount as () => Promise<number>)();
         }
       } catch {
         // HNSW stats unavailable
