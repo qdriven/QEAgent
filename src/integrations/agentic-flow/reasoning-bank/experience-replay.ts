@@ -262,6 +262,52 @@ export class ExperienceReplay {
     // Load embeddings into memory index
     await this.loadEmbeddingIndex();
 
+    // Backfill missing embeddings on captured_experiences. Hook-side INSERT
+    // paths (sources: cli-hook-post-command, patch-060-post-task, etc.)
+    // bypass storeExperience() and never call computeRealEmbedding(),
+    // leaving HNSW C cold. Fire-and-forget so init isn't blocked; cap=200
+    // per boot to bound work.
+    void (async () => {
+      try {
+        if (!this.db) return;
+        const ghosts = this.db.prepare(`
+          SELECT id, domain, task FROM captured_experiences
+          WHERE embedding IS NULL AND consolidated_into IS NULL
+          LIMIT 200
+        `).all() as Array<{ id: string; domain: string | null; task: string }>;
+        if (ghosts.length === 0) return;
+        const updateStmt = this.db.prepare(`
+          UPDATE captured_experiences
+          SET embedding = ?, embedding_dimension = ?
+          WHERE id = ?
+        `);
+        let written = 0;
+        for (const row of ghosts) {
+          const text = `${row.domain ?? ''}: ${row.task}`.slice(0, 512);
+          const embedding = await computeRealEmbedding(text);
+          const buf = Buffer.from(new Float32Array(embedding).buffer);
+          updateStmt.run(buf, embedding.length, row.id);
+          // Add to live HNSW so freshly-embedded rows are immediately searchable
+          const hnswId = this.nextHnswId++;
+          this.hnswIndex.addEmbedding({
+            vector: embedding,
+            dimension: embedding.length,
+            namespace: 'experiences',
+            text: row.id,
+            timestamp: Date.now(),
+            quantization: 'none',
+            metadata: {},
+          }, hnswId);
+          this.idToExperienceId.set(hnswId, row.id);
+          this.experienceIdToHnswId.set(row.id, hnswId);
+          written++;
+        }
+        console.log(`[ExperienceReplay] Backfilled ${written} captured_experiences embeddings`);
+      } catch (err) {
+        console.warn('[ExperienceReplay] Embedding backfill failed:', err instanceof Error ? err.message : err);
+      }
+    })();
+
     // Initialize reservoir buffer if feature flag is enabled (R10, ADR-087)
     if (getRuVectorFeatureFlags().useReservoirReplay) {
       this.reservoirBuffer = new ReservoirReplayBuffer<Experience>({ capacity: 10_000 });
