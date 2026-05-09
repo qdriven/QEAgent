@@ -5,6 +5,36 @@ All notable changes to the Agentic QE project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.9.22] - 2026-05-09
+
+**Stops the Exp counter from silently shrinking.** The consolidator's safety
+valve was deleting up to thousands of rows from `captured_experiences`
+without an audit trail; in one production database it destroyed ~16K
+historical experiences and pinned the statusline counter near a 2,000-row
+ceiling. The valve is now non-destructive: it soft-archives the same rows
+instead of deleting them, so the statusline formula
+(`consolidated_into IS NULL OR consolidated_into = 'archived'`) stays
+monotonic across releases and every firing leaves an entry in
+`experience_consolidation_log`. Also fixes a separate gap: CLI-only
+projects (`aqe init` with no MCP server ever started) silently lost every
+hook-fired experience because the `captured_experiences` schema was only
+created during MCP startup.
+
+### Fixed
+
+- **Safety valve permanently destroyed experiences** — `ExperienceConsolidator.hardDeleteExcess` (`src/learning/experience-consolidation.ts`) issued `DELETE FROM captured_experiences` whenever a domain exceeded `hardThreshold` (default 2000). The DELETE was silent (no log entry), so the loss was invisible until users noticed the Exp counter stuck. Replaced with `UPDATE captured_experiences SET consolidated_into = 'archived'` over the same selection (oldest, lowest-quality, un-applied). Method name and signature kept stable; `result.hardDeleted` is now permanently `0` for backward compatibility, the count rolls into `result.archived`. Every firing now writes a `safety-valve-archive` row to `experience_consolidation_log` with the count, current size, and threshold so future reductions are auditable.
+- **`aqe init` followed by CLI hooks lost every captured experience** — `persistCommandExperience` (in `src/cli/commands/hooks-handlers/hooks-dream-learning.ts`) ran an INSERT against `captured_experiences` without ensuring the table exists. The schema is created by `initializeExperienceCapture()`, which previously only ran from MCP server startup (`src/mcp/entry.ts`). In a freshly-init'd project where the user runs only CLI hooks (no MCP server attached), the first `aqe hooks post-edit` reported `experienceRecorded: true` while silently failing to persist. The hook now calls `initializeExperienceCapture()` before the INSERT — idempotent (internal lock), so it's a one-time bootstrap on the first hook fire.
+
+### Added
+
+- **`tests/unit/learning/experience-consolidation-safety-valve.test.ts`** — 7 regression tests guarding the non-destructive invariant: no physical deletion, active count drops to threshold, statusline-formula count stays monotonic, audit log entry written, no-op below threshold, applied (`application_count > 0`) rows preserved, `result.hardDeleted` stays at 0.
+
+### Upgrade Notes
+
+- No breaking changes. `ConsolidationResult.hardDeleted` field remains in the type but is permanently `0`; downstream callers that summed it (e.g., `LearningConsolidationWorker`) keep working unchanged.
+- Existing rows that were physically deleted by the old safety valve cannot be recovered from the codebase fix — restoration requires re-importing from a backup database. Anyone who held a pre-fix backup can restore by inserting the missing rows with `consolidated_into = 'archived'`.
+- DB size will grow more aggressively per domain — archived rows persist instead of being pruned. The `hardThreshold` (default 2000) still bounds the *active* row count for HNSW build performance; only the destruction is removed.
+
 ## [3.9.21] - 2026-05-08
 
 **Three independent fixes** that unblock real-world usage: Windows installs no longer

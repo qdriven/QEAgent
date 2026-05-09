@@ -5,6 +5,12 @@
  * - Phase 1: Clusters & merges similar experiences via HNSW
  * - Phase 2: Reinforces quality based on reuse success
  * - Phase 3: Archives truly valueless entries (soft-delete only)
+ * - Phase 4 (safety valve): Soft-archives oldest/lowest-quality rows when a
+ *   domain exceeds `hardThreshold`. Previously did `DELETE FROM` which
+ *   permanently destroyed ~16K rows in production (see release notes for
+ *   v3.9.22). Now strictly non-destructive: rows stay queryable and counted
+ *   by the statusline formula, only `consolidated_into` changes to
+ *   'archived'.
  *
  * Ensures the Exp counter is monotonically non-decreasing.
  */
@@ -24,9 +30,14 @@ export interface ConsolidationResult {
   merged: number;
   /** Experiences with quality recalculated */
   qualityUpdated: number;
-  /** Experiences soft-archived */
+  /** Experiences soft-archived (Phase 3 valueless + Phase 4 safety valve) */
   archived: number;
-  /** Hard-deleted (only when exceeding safety valve) */
+  /**
+   * Deprecated: previously the count of physically-deleted rows when a
+   * domain exceeded `hardThreshold`. Always 0 since v3.9.22 — the safety
+   * valve is now non-destructive (soft-archive only). Kept for callers that
+   * still read the field; new code should treat it as a permanent zero.
+   */
   hardDeleted: number;
   /** Total active experiences remaining */
   activeRemaining: number;
@@ -41,7 +52,12 @@ export interface ConsolidationConfig {
   maxMergesPerRun: number;
   /** Soft threshold: start consolidating when domain exceeds this */
   softThreshold: number;
-  /** Hard threshold: safety valve for hard-delete */
+  /**
+   * Hard threshold: safety valve. When a domain still exceeds this after
+   * Phases 1-3, the oldest/lowest-quality un-applied rows are
+   * soft-archived (consolidated_into = 'archived'). NOT hard-deleted —
+   * archived rows still count toward the statusline Exp formula.
+   */
   hardThreshold: number;
   /** Min age in days for archival eligibility */
   archiveMinAgeDays: number;
@@ -179,16 +195,21 @@ export class ExperienceConsolidator {
     // Phase 3: Archive Valueless
     result.archived = this.archiveValueless(domain);
 
-    // Safety valve: hard-delete if still over hard threshold
+    // Safety valve: when the domain still exceeds hardThreshold after the
+    // soft phases, archive (not delete) the oldest low-quality excess.
+    // Result is attributed to `archived` — `hardDeleted` stays 0 since
+    // v3.9.22 (see ConsolidationResult docstring).
     const afterCount = (this.db!.prepare(
       "SELECT COUNT(*) as cnt FROM captured_experiences WHERE domain = ? AND consolidated_into IS NULL"
     ).get(domain) as { cnt: number }).cnt;
 
+    let safetyValveArchived = 0;
     if (afterCount > this.config.hardThreshold) {
-      result.hardDeleted = this.hardDeleteExcess(domain, afterCount);
+      safetyValveArchived = this.hardDeleteExcess(domain, afterCount);
+      result.archived += safetyValveArchived;
     }
 
-    result.activeRemaining = afterCount - result.hardDeleted;
+    result.activeRemaining = afterCount - safetyValveArchived;
     return result;
   }
 
@@ -482,48 +503,70 @@ export class ExperienceConsolidator {
   }
 
   // ============================================================================
-  // Safety Valve: Hard Delete
+  // Safety Valve: Soft Archive (formerly Hard Delete)
   // ============================================================================
+  //
+  // Pre-v3.9.22 this method ran `DELETE FROM captured_experiences`, which
+  // permanently destroyed ~16K rows in production once `code-intelligence`
+  // exceeded the threshold. The replacement keeps the same trigger condition
+  // (domain still over `hardThreshold` after Phases 1-3) but soft-archives
+  // the excess instead. Archived rows remain in the table and continue to
+  // contribute to the statusline Exp formula
+  // (`consolidated_into IS NULL OR consolidated_into = 'archived'`), so the
+  // counter stays monotonic.
+  //
+  // Method name and signature are preserved so the existing caller
+  // (`consolidateDomain`) keeps working unchanged. The returned number now
+  // represents rows transitioned active → archived, not rows deleted.
+  // ConsolidationResult.hardDeleted is kept zero for that reason; the
+  // archive count is rolled into Phase 3's `archived` total.
 
   private hardDeleteExcess(domain: string, currentCount: number): number {
     const excess = currentCount - this.config.hardThreshold;
     if (excess <= 0) return 0;
 
-    // Delete oldest archived entries first
-    const archivedDeleted = this.db!.prepare(`
-      DELETE FROM captured_experiences
+    // Soft-archive oldest low-quality un-applied active rows.
+    // Same selection criteria as the previous hard-delete path so the
+    // memory pressure relief behavior is unchanged — only the operation
+    // (UPDATE vs DELETE) changes.
+    const result = this.db!.prepare(`
+      UPDATE captured_experiences
+      SET consolidated_into = 'archived'
       WHERE id IN (
         SELECT id FROM captured_experiences
-        WHERE domain = ? AND consolidated_into = 'archived'
-        ORDER BY started_at ASC
+        WHERE domain = ? AND consolidated_into IS NULL AND application_count = 0
+        ORDER BY quality ASC, started_at ASC
         LIMIT ?
       )
     `).run(domain, excess);
 
-    let totalDeleted = archivedDeleted.changes;
+    const archived = result.changes;
 
-    // If still over, delete oldest low-quality active entries
-    if (totalDeleted < excess) {
-      const remaining = excess - totalDeleted;
-      const activeDeleted = this.db!.prepare(`
-        DELETE FROM captured_experiences
-        WHERE id IN (
-          SELECT id FROM captured_experiences
-          WHERE domain = ? AND consolidated_into IS NULL AND application_count = 0
-          ORDER BY quality ASC, started_at ASC
-          LIMIT ?
-        )
-      `).run(domain, remaining);
-      totalDeleted += activeDeleted.changes;
-    }
+    if (archived > 0) {
+      try {
+        this.db!.prepare(`
+          INSERT INTO experience_consolidation_log (id, domain, action, source_ids, details, created_at)
+          VALUES (?, ?, 'safety-valve-archive', '[]', ?, datetime('now'))
+        `).run(
+          uuidv4(),
+          domain,
+          JSON.stringify({
+            count: archived,
+            currentCount,
+            hardThreshold: this.config.hardThreshold,
+            note: 'soft-archive replacement for legacy hard-delete safety valve',
+          }),
+        );
+      } catch {
+        // Logging is best-effort; safety-valve effect is in the UPDATE above.
+      }
 
-    if (totalDeleted > 0) {
       console.warn(
-        `[ExperienceConsolidator] Safety valve: hard-deleted ${totalDeleted} from ${domain}`
+        `[ExperienceConsolidator] Safety valve: soft-archived ${archived} from ${domain} (was ${currentCount}, threshold ${this.config.hardThreshold})`
       );
     }
 
-    return totalDeleted;
+    return archived;
   }
 
   // ============================================================================
