@@ -163,6 +163,12 @@ export async function persistCommandExperience(opts: {
     if (!um.isInitialized()) {
       await um.initialize();
     }
+    // Ensure captured_experiences and consolidation columns exist. Without
+    // this, CLI-only projects (`aqe init` with no MCP server ever started)
+    // silently lose every hook-fired experience because the table is only
+    // created during MCP startup. Idempotent — guarded by an internal lock.
+    const { initializeExperienceCapture } = await import('../../../learning/experience-capture-middleware.js');
+    await initializeExperienceCapture();
     const db = um.getDatabase();
     try { db.pragma('busy_timeout = 60000'); } catch { /* hook-side patient timeout (ADR-001 / patch 260) */ }
     const id = `cli-${Date.now()}-${randomUUID().slice(0, 8)}`;
